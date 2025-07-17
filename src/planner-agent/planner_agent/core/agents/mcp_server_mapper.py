@@ -49,7 +49,22 @@ class MCPNodeMapper(MultiAgentCoordinator):
     """
     This node is responsible for mapping the right mcp server for a given a2a agent card.
     """
-    def __init__(self, llm_model: Any, enable_visual_logging: bool = True, websocket: Optional[Any] = None, stream_output: Optional[Any] = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        llm_model: Any,
+        config: Optional[Config] = None,
+        logger: Optional[AgentLogger] = None,
+        enable_visual_logging: bool = True,
+        websocket: Optional[Any] = None,
+        stream_output: Optional[Any] = None,
+        **kwargs: Any
+    ) -> None:
+        self._llm_model = llm_model
+        self._logger = logger or AgentLogger("mcp_server_mapper")
+        self._mcp_planner_config = config or Config()
+        self._enable_visual_logging = enable_visual_logging
+        self._websocket = websocket
+        self._stream_output = stream_output
         agent_config = AgentConfig(
             name="mcp_server_mapper",
             description="MCP Server Mapper",
@@ -63,12 +78,6 @@ class MCPNodeMapper(MultiAgentCoordinator):
             enable_logging=True,
             log_level="INFO"
         )
-        self._enable_visual_logging = enable_visual_logging
-        self._websocket = websocket
-        self._stream_output = stream_output
-        self._llm_model = llm_model
-        self._logger = AgentLogger("mcp_server_mapper")
-        
         super().__init__(config=agent_config, **kwargs)
 
     @log_sync
@@ -79,7 +88,6 @@ class MCPNodeMapper(MultiAgentCoordinator):
                 websocket=self._websocket,
                 stream_output=self._stream_output
             )
-        self._mcp_planner_config = Config()
         # self.available_tools = self._mcp_client.get_available_tools()
 
 

@@ -65,10 +65,27 @@ class MultiAgentPlanner(MultiAgentCoordinator):
     """
 
     @log_sync
-    def __init__(self, enable_visual_logging: bool = True, websocket: Optional[Any] = None, stream_output: Optional[Any] = None, **kwargs: Any) -> None:
-        self._logger = AgentLogger("multi_agent_planner")
-
-        # Create agent configuration
+    def __init__(
+        self,
+        llm_model: Any = None,
+        a2a_agent_mapper: Optional['A2AAgentCardMapper'] = None,
+        mcp_server_mapper: Optional['MCPNodeMapper'] = None,
+        config: Optional[Config] = None,
+        logger: Optional[AgentLogger] = None,
+        enable_visual_logging: bool = True,
+        websocket: Optional[Any] = None,
+        stream_output: Optional[Any] = None,
+        **kwargs: Any
+    ) -> None:
+        # Always set self.model early to avoid attribute errors
+        self.model = llm_model  # May be None; will be set in _initialize_agent if not provided
+        self.a2a_agent_mapper = a2a_agent_mapper
+        self.mcp_server_mapper = mcp_server_mapper
+        self._logger = logger or AgentLogger("multi_agent_planner")
+        self._planner_config = config or Config()
+        self._enable_visual_logging = enable_visual_logging
+        self._websocket = websocket
+        self._stream_output = stream_output
         agent_config = AgentConfig(
             name="MULTI_AGENT_PLANNER",
             description="Multi-agent DevOps task planning with intelligent routing",
@@ -82,41 +99,29 @@ class MultiAgentPlanner(MultiAgentCoordinator):
             enable_logging=True,
             log_level="INFO"
         )
-        
-        # Store enhanced logging parameters
-        self._enable_visual_logging = enable_visual_logging
-        self._websocket = websocket
-        self._stream_output = stream_output
-        
-        # Initialize the base coordinator
         super().__init__(config=agent_config, **kwargs)
-
-        # logger.info('MultiAgentPlanner initialization complete')
 
     @log_sync
     def _initialize_agent(self, **kwargs: Any) -> None:
-        """Initialize multi-agent planner specific components."""
-        # logger.info("Initializing MultiAgentPlanner components")
-        
-        # Set up enhanced logging for visual debugging and streaming
+        """Initialize multi-agent planner specific components using injected dependencies."""
         if self._enable_visual_logging:
             self.setup_enhanced_logging(
                 websocket=self._websocket,
                 stream_output=self._stream_output
             )
-        
-        # Initialize LLM
-        try:
-            self._planner_config = Config()
-            self.model = LLMProvider.create_llm(**self._planner_config.get_llm_config())
-            # logger.info('LLM initialized successfully')
-        except Exception as e:
-            # logger.error(f'Failed to initialize LLM: {e}')
-            raise ConfigError(f"LLM initialization failed: {e}")
-        
-        self.a2a_agent_mapper = A2AAgentCardMapper(self.model)
-        self.mcp_server_mapper = MCPNodeMapper(self.model)
-        # Build multi-agent graph
+        # Initialize LLM if not injected
+        if self.model is None:
+            try:
+                self.model = LLMProvider.create_llm(**self._planner_config.get_llm_config())
+            except Exception as e:
+                raise ConfigError(f"LLM initialization failed: {e}")
+        # Initialize agent mappers if not injected
+        if self.a2a_agent_mapper is None:
+            from planner_agent.core.agents.a2a_agent_mapper import A2AAgentCardMapper
+            self.a2a_agent_mapper = A2AAgentCardMapper(self.model, config=self._planner_config, logger=self._logger)
+        if self.mcp_server_mapper is None:
+            from planner_agent.core.agents.mcp_server_mapper import MCPNodeMapper
+            self.mcp_server_mapper = MCPNodeMapper(self.model, config=self._planner_config, logger=self._logger)
         self.graph = self._build_graph()
 
     def generic_branch(self, state: MultiAgentState, *args: Any, **kwargs: Any) -> str:
@@ -124,22 +129,20 @@ class MultiAgentPlanner(MultiAgentCoordinator):
 
     @log_sync
     def _build_graph(self):
-        """Build the multi-agent state graph with node-specific tool bindings."""
-        
+        """Build the multi-agent state graph with node-specific tool bindings. Requires agent mappers to be set."""
+        if self.a2a_agent_mapper is None or self.mcp_server_mapper is None:
+            raise RuntimeError("Both a2a_agent_mapper and mcp_server_mapper must be set before building the graph.")
         # Create the graph
         graph = StateGraph(MultiAgentState)
-        
         # Add nodes with specific purposes
         graph.add_node("task_decomposition", self._task_decomposition_node)
         graph.add_node("a2a_agent_mapper", self.a2a_agent_mapper.node_stream)
         graph.add_node("mcp_server_mapper", self.mcp_server_mapper.node_stream)
-        
         # Add edges with conditional routing
         graph.add_edge(START, "task_decomposition")
         graph.add_conditional_edges("task_decomposition", self.generic_branch)
         graph.add_conditional_edges("a2a_agent_mapper", self.generic_branch)
         graph.add_conditional_edges("mcp_server_mapper", self.generic_branch)
-        
         # Compile with memory
         return graph.compile(checkpointer=memory)
 

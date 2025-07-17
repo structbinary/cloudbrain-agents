@@ -34,7 +34,22 @@ class A2AAgentCardMapper(MultiAgentCoordinator):
     """
     This node is responsible for mapping the right a2a agent card for a given task.
     """
-    def __init__(self, llm_model: Any, enable_visual_logging: bool = True, websocket: Optional[Any] = None, stream_output: Optional[Any] = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        llm_model: Any,
+        config: Optional[Config] = None,
+        logger: Optional[AgentLogger] = None,
+        enable_visual_logging: bool = True,
+        websocket: Optional[Any] = None,
+        stream_output: Optional[Any] = None,
+        **kwargs: Any
+    ) -> None:
+        self._llm_model = llm_model
+        self._logger = logger or AgentLogger("a2a_agent_mapper")
+        self._a2a_planner_config = config or Config()
+        self._enable_visual_logging = enable_visual_logging
+        self._websocket = websocket
+        self._stream_output = stream_output
         agent_config = AgentConfig(
             name="a2a_agent_mapper",
             description="A2A Agent Mapper",
@@ -48,12 +63,6 @@ class A2AAgentCardMapper(MultiAgentCoordinator):
             enable_logging=True,
             log_level="INFO"
         )
-        self._enable_visual_logging = enable_visual_logging
-        self._websocket = websocket
-        self._stream_output = stream_output
-        self._llm_model = llm_model
-        self._logger = AgentLogger("a2a_agent_mapper")
-        
         super().__init__(config=agent_config, **kwargs)
 
     @log_sync
@@ -64,7 +73,6 @@ class A2AAgentCardMapper(MultiAgentCoordinator):
                 websocket=self._websocket,
                 stream_output=self._stream_output
             )
-        self._a2a_planner_config = Config()
         # self.available_tools = self._mcp_client.get_available_tools()
 
 
