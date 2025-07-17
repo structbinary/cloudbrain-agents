@@ -24,11 +24,14 @@ import functools
 import inspect
 import json
 
+# Try to import config, fallback to defaults if not available
+try:
+    from planner_agent.config.config import Config
+    config = Config()
+except Exception:
+    config = None
+
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 class AgentColor(Enum):
@@ -52,11 +55,37 @@ class LogLevel(Enum):
 class AgentLogger:
     """Logger class for agent output with color encoding and multiple output methods."""
     
-    def __init__(self, agent_name: str = "BASE") -> None:
+    def __init__(self, agent_name: str = "BASE", log_to_console: Optional[bool] = None, log_to_file: Optional[bool] = None, log_level: Optional[str] = None, log_file: Optional[str] = None) -> None:
         self.agent_name = agent_name
-        self.logger = logging.getLogger(f"{__name__}.{agent_name}")
         self.websocket = None
         self.stream_output = None
+        # Determine config values
+        if config:
+            self.log_to_console = log_to_console if log_to_console is not None else getattr(config, 'LOG_TO_CONSOLE', True)
+            self.log_to_file = log_to_file if log_to_file is not None else getattr(config, 'LOG_TO_FILE', True)
+            self.log_level = log_level if log_level is not None else getattr(config, 'LOG_LEVEL', 'INFO')
+            self.log_file = log_file if log_file is not None else getattr(config, 'LOG_FILE', 'planner_agent.log')
+        else:
+            self.log_to_console = log_to_console if log_to_console is not None else True
+            self.log_to_file = log_to_file if log_to_file is not None else True
+            self.log_level = log_level if log_level is not None else 'INFO'
+            self.log_file = log_file if log_file is not None else 'planner_agent.log'
+        self.logger = logging.getLogger(f"{__name__}.{agent_name}")
+        self.logger.setLevel(self.log_level)
+        # Remove all handlers to avoid duplicate logs
+        self.logger.handlers = []
+        # Always use only the message, no preamble
+        formatter = logging.Formatter('%(message)s')
+        if self.log_to_file:
+            file_handler = logging.FileHandler(self.log_file)
+            file_handler.setLevel(self.log_level)
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+        # Always add a stream handler for console, but only emit if log_to_console is True
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(self.log_level)
+        stream_handler.setFormatter(formatter)
+        self.logger.addHandler(stream_handler)
         
     def set_websocket(self, websocket: Any, stream_output: Callable) -> None:
         """Set websocket and stream output function."""
@@ -80,14 +109,16 @@ class AgentLogger:
         }
         
     def _log_to_console(self, message: str, level: str = "INFO") -> None:
-        """Log to console with color."""
-        color = self._get_color(self.agent_name)
-        print(f"{color}{self.agent_name}: {message}{Style.RESET_ALL}")
+        """Log to console with color, if enabled."""
+        if self.log_to_console:
+            color = self._get_color(self.agent_name)
+            print(f"{color}{message}{Style.RESET_ALL}")
         
     def _log_to_file(self, message: str, level: str = "INFO") -> None:
-        """Log to file."""
-        log_method = getattr(self.logger, level.lower())
-        log_method(f"[{self.agent_name}] {message}")
+        """Log to file, if enabled."""
+        if self.log_to_file:
+            log_method = getattr(self.logger, level.lower())
+            log_method(message)
         
     async def _log_to_websocket(self, message: str) -> None:
         """Log to websocket."""
@@ -114,6 +145,64 @@ class AgentLogger:
     def create_logger(cls, agent_name: str) -> 'AgentLogger':
         """Create a new logger instance."""
         return cls(agent_name)
+
+    def log_structured(
+        self,
+        level: str = "INFO",
+        message: str = "",
+        task_id: Optional[str] = None,
+        context_id: Optional[str] = None,
+        extra: Optional[dict] = None,
+    ) -> None:
+        """
+        Log a structured message with context fields.
+        If LOG_STRUCTURED_JSON is True, outputs JSON; otherwise, outputs a formatted string.
+        All output is routed through the logger's console and file handlers, respecting config.
+        Args:
+            level: Log level (e.g., "INFO", "ERROR")
+            message: Log message
+            task_id: Optional task ID
+            context_id: Optional context/session ID
+            extra: Optional dict of extra fields (e.g., agent_name, etc.)
+        """
+        structured = False
+        if config:
+            structured = getattr(config, 'LOG_STRUCTURED_JSON', False)
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "agent_name": getattr(self, 'agent_name', None),
+            "log_type": level,
+            "message": message,
+            "task_id": task_id,
+            "context_id": context_id
+        }
+        if extra:
+            log_entry.update(extra)
+        if structured:
+            msg = json.dumps(log_entry)
+            self._log_to_console(msg, level=level)
+            self._log_to_file(msg, level=level)
+        else:
+            # Compose a readable string with all fields
+            parts = [
+                f"[{log_entry['timestamp']}]",
+                f"{log_entry.get('agent_name', '')}",
+                f"[{level}]",
+                message,
+                f"task_id={task_id}" if task_id else "",
+                f"context_id={context_id}" if context_id else ""
+            ]
+            # Add any extra fields
+            if extra:
+                for k, v in extra.items():
+                    if k not in ("agent_name",):
+                        parts.append(f"{k}={v}")
+            std_msg = " ".join([p for p in parts if p])
+            self._log_to_console(std_msg, level=level)
+            self._log_to_file(std_msg, level=level)
+
+# Global AgentLogger for decorator logs (must be after class definition)
+_decorator_logger = AgentLogger("DECORATOR")
 
 def get_log_context(args: Any, kwargs: Any, func: Optional[Callable] = None) -> tuple[Optional[str], Optional[Any], Optional[Any]]:
     agent_name = None
@@ -168,15 +257,27 @@ def get_log_context(args: Any, kwargs: Any, func: Optional[Callable] = None) -> 
     return agent_name, task_id, context_id
 
 def log_json(log_type: str, message: str, agent_name: Optional[str] = None, task_id: Optional[Any] = None, context_id: Optional[Any] = None) -> None:
-    log_entry = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "agent_name": agent_name,
-        "log_type": log_type,
-        "message": message,
-        "task_id": task_id,
-        "context_id": context_id
-    }
-    print(json.dumps(log_entry))
+    # Check config for structured logging
+    structured = False
+    if config:
+        structured = getattr(config, 'LOG_STRUCTURED_JSON', False)
+    if structured:
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "agent_name": agent_name,
+            "log_type": log_type,
+            "message": message,
+            "task_id": task_id,
+            "context_id": context_id
+        }
+        msg = json.dumps(log_entry)
+        _decorator_logger._log_to_console(msg, level=log_type)
+        _decorator_logger._log_to_file(msg, level=log_type)
+    else:
+        # Use standard log format
+        std_msg = f"{agent_name or ''} [{log_type}] {message} (task_id={task_id}, context_id={context_id})"
+        _decorator_logger._log_to_console(std_msg, level=log_type)
+        _decorator_logger._log_to_file(std_msg, level=log_type)
 
 def log_sync(func: Callable) -> Callable:
     @functools.wraps(func)

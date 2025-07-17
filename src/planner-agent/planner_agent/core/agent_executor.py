@@ -14,7 +14,7 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-import logging
+from planner_agent.utils.logger import AgentLogger
 import inspect
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -38,7 +38,7 @@ from planner_agent.core.base_agent import BaseAgent
 from typing import cast, Any
 
 
-logger = logging.getLogger(__name__)
+logger = AgentLogger("GENERIC_AGENT_EXECUTOR")
 
 
 class GenericAgentExecutor(AgentExecutor):
@@ -52,29 +52,61 @@ class GenericAgentExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
-        logger.info(f'Executing agent {self.agent.name}')
+        logger.log_structured(
+            level="INFO",
+            message=f'Executing agent {self.agent.name}',
+            extra={"agent_name": self.agent.name}
+        )
         error = self._validate_request(context)
         if error:
-            logger.error('Validation error in request context')
+            logger.log_structured(
+                level="ERROR",
+                message='Validation error in request context',
+                extra={"agent_name": self.agent.name}
+            )
             raise ServerError(error=InvalidParamsError())
 
         query = context.get_user_input()
-        logger.debug(f'User query: {query}')
+        logger.log_structured(
+            level="DEBUG",
+            message=f'User query: {query}',
+            extra={"agent_name": self.agent.name}
+        )
 
         task = context.current_task
 
         if not task:
-            logger.info('No current task found, creating new task')
+            logger.log_structured(
+                level="INFO",
+                message='No current task found, creating new task',
+                extra={"agent_name": self.agent.name}
+            )
             if context.message is None:
-                logger.error('No message provided for new task')
+                logger.log_structured(
+                    level="ERROR",
+                    message='No message provided for new task',
+                    extra={"agent_name": self.agent.name}
+                )
                 raise ServerError(error=InvalidParamsError())
             task = new_task(context.message)
-            logger.info(f'Created new task with id: {task.id}, contextId: {task.contextId}')  # DEBUG log
+            logger.log_structured(
+                level="INFO",
+                message=f'Created new task with id: {task.id}, contextId: {task.contextId}',
+                extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+            )
             await event_queue.enqueue_event(task)
-            logger.debug(f'Enqueued new task: {task}')
+            logger.log_structured(
+                level="DEBUG",
+                message=f'Enqueued new task: {task}',
+                extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+            )
 
         updater = TaskUpdater(event_queue, task.id, task.contextId)
-        logger.info(f'Starting agent stream for task_id={task.id}, context_id={task.contextId}')
+        logger.log_structured(
+            level="INFO",
+            message=f'Starting agent stream',
+            extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+        )
 
         try:
             # Ensure self.agent.stream is an async generator, or await if it's a coroutine returning one
@@ -91,7 +123,11 @@ class GenericAgentExecutor(AgentExecutor):
                         event,
                         (TaskStatusUpdateEvent, TaskArtifactUpdateEvent),
                     ):
-                        logger.info(f'Enqueuing event from agent: {event}')
+                        logger.log_structured(
+                            level="INFO",
+                            message=f'Enqueuing event from agent: {event}',
+                            extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                        )
                         await event_queue.enqueue_event(event)
                     continue
                 
@@ -105,13 +141,21 @@ class GenericAgentExecutor(AgentExecutor):
                 # logger.debug(f'Mapped custom status "{custom_status}" to task_state {task_state}')
 
                 if is_task_complete:
-                    logger.info('Task is marked as complete by agent')
+                    logger.log_structured(
+                        level="INFO",
+                        message='Task is marked as complete by agent',
+                        extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                    )
                     if item.response_type == 'data':
                         data_part: Part = cast(Part, DataPart(data=item.content))
                     else:
                         text_part: Part = cast(Part, TextPart(text=item.content))
 
-                    logger.info('Adding artifact to updater')
+                    logger.log_structured(
+                        level="INFO",
+                        message='Adding artifact to updater',
+                        extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                    )
                     if item.response_type == 'data':
                         await updater.add_artifact(
                             [data_part],
@@ -122,7 +166,11 @@ class GenericAgentExecutor(AgentExecutor):
                             [text_part],
                             name=f'{self.agent.name}-result',
                         )
-                    logger.info('Sending final status update: TaskState.completed')
+                    logger.log_structured(
+                        level="INFO",
+                        message='Sending final status update: TaskState.completed',
+                        extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                    )
                     await updater.update_status(
                         TaskState.completed,
                         new_agent_text_message(
@@ -132,12 +180,24 @@ class GenericAgentExecutor(AgentExecutor):
                         ),
                         final=True,
                     )
-                    logger.info('Calling updater.complete()')
+                    logger.log_structured(
+                        level="INFO",
+                        message='Calling updater.complete()',
+                        extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                    )
                     await updater.complete()
-                    logger.info('Updater.complete() finished, breaking stream loop')
+                    logger.log_structured(
+                        level="INFO",
+                        message='Updater.complete() finished, breaking stream loop',
+                        extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                    )
                     break
                 if require_user_input:
-                    logger.info('Agent requires user input, updating status to input_required')
+                    logger.log_structured(
+                        level="INFO",
+                        message='Agent requires user input, updating status to input_required',
+                        extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                    )
                     await updater.update_status(
                         TaskState.input_required,
                         new_agent_text_message(
@@ -147,9 +207,17 @@ class GenericAgentExecutor(AgentExecutor):
                         ),
                         final=True,
                     )
-                    logger.info('Status updated to input_required, breaking stream loop')
+                    logger.log_structured(
+                        level="INFO",
+                        message='Status updated to input_required, breaking stream loop',
+                        extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                    )
                     break
-                logger.info(f'Updating status to {task_state}')
+                logger.log_structured(
+                    level="INFO",
+                    message=f'Updating status to {task_state}',
+                    extra={"agent_name": self.agent.name, "task_id": task.id, "context_id": task.contextId}
+                )
                 await updater.update_status(
                     task_state,
                     new_agent_text_message(
@@ -160,7 +228,11 @@ class GenericAgentExecutor(AgentExecutor):
                 )
                 # logger.debug('Status update sent')
         except Exception as e:
-            logger.error(f'Exception in agent executor stream: {e}', exc_info=True)
+            logger.log_structured(
+                level="ERROR",
+                message=f'Exception in agent executor stream: {e}',
+                extra={"agent_name": self.agent.name}
+            )
             raise
 
 

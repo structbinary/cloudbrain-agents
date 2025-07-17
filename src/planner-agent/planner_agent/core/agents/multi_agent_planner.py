@@ -42,7 +42,7 @@ from planner_agent.core.base_agent import MultiAgentCoordinator, AgentConfig, Ag
 from planner_agent.core.llm.llm_provider import LLMProvider
 from planner_agent.models.agent_state import MultiAgentState, TaskDecomposition
 from planner_agent.prompts.prompts import PLANNER_TASK_DECOMPOSITION_PROMPT
-from planner_agent.utils.logger import log_sync, log_async
+from planner_agent.utils.logger import log_sync, log_async, AgentLogger
 from planner_agent.core.agents.a2a_agent_mapper import A2AAgentCardMapper
 from planner_agent.core.agents.mcp_server_mapper import MCPNodeMapper
 import uuid
@@ -66,7 +66,7 @@ class MultiAgentPlanner(MultiAgentCoordinator):
 
     @log_sync
     def __init__(self, enable_visual_logging: bool = True, websocket: Optional[Any] = None, stream_output: Optional[Any] = None, **kwargs: Any) -> None:
-        # logger.info('Initializing MultiAgentPlanner with node-specific tool bindings')
+        self._logger = AgentLogger("multi_agent_planner")
 
         # Create agent configuration
         agent_config = AgentConfig(
@@ -146,8 +146,20 @@ class MultiAgentPlanner(MultiAgentCoordinator):
 
     @log_async
     async def _task_decomposition_node(self, state: MultiAgentState) -> MultiAgentState:
-        await self.log_enhanced(f"DEBUG: [task_decomposition_node] START state={state}", "INFO")
-        await self.log_enhanced("🔍 Starting Task Decomposition Phase", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message="[task_decomposition_node] START",
+            task_id=getattr(state, 'task_id', None),
+            context_id=getattr(state, 'context_id', None),
+            extra={"agent_name": self.__class__.__name__, "state": str(state)}
+        )
+        self._logger.log_structured(
+            level="INFO",
+            message="Starting Task Decomposition Phase",
+            task_id=getattr(state, 'task_id', None),
+            context_id=getattr(state, 'context_id', None),
+            extra={"agent_name": self.__class__.__name__}
+        )
 
         # If resuming from human input
         if state.status == "input_required":
@@ -162,7 +174,13 @@ class MultiAgentPlanner(MultiAgentCoordinator):
             else:
                 # Pause for human input
                 interrupt({"question": state.question})
-                await self.log_enhanced(f"DEBUG: [task_decomposition_node] END (interrupt) state={state}", "INFO")
+                self._logger.log_structured(
+                    level="INFO",
+                    message="[task_decomposition_node] END (interrupt)",
+                    task_id=getattr(state, 'task_id', None),
+                    context_id=getattr(state, 'context_id', None),
+                    extra={"agent_name": self.__class__.__name__, "state": str(state)}
+                )
                 return state
 
         prompt = ChatPromptTemplate.from_template(PLANNER_TASK_DECOMPOSITION_PROMPT)
@@ -175,9 +193,21 @@ class MultiAgentPlanner(MultiAgentCoordinator):
         user_query = getattr(state, "user_query", None)
         if user_query is None:
             user_query = ""
-        await self.log_enhanced(f"DEBUG: user_query={user_query}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"user_query={user_query}",
+            task_id=getattr(state, 'task_id', None),
+            context_id=getattr(state, 'context_id', None),
+            extra={"agent_name": self.__class__.__name__}
+        )
         response = await decomposition_agent.ainvoke({'messages': [('user', user_query)]})
-        await self.log_enhanced(f"DEBUG: LLM raw response: {response}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"LLM raw response: {response}",
+            task_id=getattr(state, 'task_id', None),
+            context_id=getattr(state, 'context_id', None),
+            extra={"agent_name": self.__class__.__name__}
+        )
         message = response['messages'][-1]
         if isinstance(message, AIMessage):
             content = message.content
@@ -189,7 +219,13 @@ class MultiAgentPlanner(MultiAgentCoordinator):
             content_str = str(content) if not isinstance(content, str) else content
             content_data = json.loads(content_str)
             structured_response = TaskDecomposition(**content_data)
-        await self.log_enhanced(f"DEBUG: structured_response={structured_response}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"structured_response={structured_response}",
+            task_id=getattr(state, 'task_id', None),
+            context_id=getattr(state, 'context_id', None),
+            extra={"agent_name": self.__class__.__name__}
+        )
         # --- Set next node ---
         if structured_response.status == "completed":
             state.next = "a2a_agent_mapper"
@@ -203,19 +239,37 @@ class MultiAgentPlanner(MultiAgentCoordinator):
             state.next = "__end__"
             state.status = "failed"
             state.question = structured_response.question
-        await self.log_enhanced(f"DEBUG: [task_decomposition_node] END state={state}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message="[task_decomposition_node] END",
+            task_id=getattr(state, 'task_id', None),
+            context_id=getattr(state, 'context_id', None),
+            extra={"agent_name": self.__class__.__name__, "state": str(state)}
+        )
         return state
 
 
     @log_async
     async def stream(self, query_or_command, session_id: str, task_id: str) -> AsyncIterable[AgentResponse]:
-        await self.log_enhanced(f"DEBUG: [stream] START session_id={session_id}, task_id={task_id}, query_or_command={query_or_command}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"[stream] START",
+            task_id=task_id,
+            context_id=session_id,
+            extra={"agent_name": self.__class__.__name__, "query_or_command": str(query_or_command)}
+        )
         """
         Stream method supporting both initial and resume calls for human-in-the-loop (HITL).
         - If query_or_command is a string: initial call (user query)
         - If query_or_command is a Command: resume call (user feedback)
         """
-        await self.log_enhanced(f"🚀 Starting Multi-Agent Stream | Session: {session_id}... | Task: {task_id} | Query/Command: {query_or_command}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"Starting Multi-Agent Stream",
+            task_id=task_id,
+            context_id=session_id,
+            extra={"agent_name": self.__class__.__name__, "query_or_command": str(query_or_command)}
+        )
 
         # For each new user-initiated task, generate a unique thread_id
         if isinstance(query_or_command, Command):
@@ -245,7 +299,13 @@ class MultiAgentPlanner(MultiAgentCoordinator):
         try:
             async for item in self.graph.astream(graph_input, config, stream_mode='values'):
                 step_count += 1
-                await self.log_enhanced(f"DEBUG: [stream] step={step_count} item={item}", "INFO")
+                self._logger.log_structured(
+                    level="INFO",
+                    message=f"[stream] step={step_count} item={item}",
+                    task_id=task_id,
+                    context_id=session_id,
+                    extra={"agent_name": self.__class__.__name__, "step_count": step_count, "item": str(item)}
+                )
 
                 # 1. Handle human-in-the-loop interrupt
                 if '__interrupt__' in item:

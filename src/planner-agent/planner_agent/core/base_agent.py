@@ -26,10 +26,9 @@ from typing import Any, Dict, List, Optional, AsyncIterable, TypeVar, Generic, U
 from dataclasses import dataclass, field
 from enum import Enum
 from planner_agent.utils.exceptions import ConfigError
-from loguru import logger
+from planner_agent.utils.logger import AgentLogger
 import asyncio
 from contextlib import asynccontextmanager
-from planner_agent.utils.logger import log_sync, log_async
 from pydantic import BaseModel, Field
 
 # Type variables for generic agent responses
@@ -154,19 +153,19 @@ class BaseAgent(ABC, Generic[ConfigType]):
         self._metrics = AgentMetrics() if self._config.enable_metrics else None
         self._session_data: Dict[str, Any] = {}
         
-        # Set up logging
-        if self._config.enable_logging:
-            logger.configure(handlers=[{
-                "sink": lambda msg: self._log_handler(msg),
-                "level": self._config.log_level
-            }])
+        # Set up centralized logger
+        self._logger = AgentLogger(self.name)
             
         # Initialize agent-specific components
         self._initialize_agent(**kwargs)
         
         # Mark as ready
         self._status = AgentStatus.READY
-        logger.info(f"Agent '{self.name}' initialized successfully")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"Agent '{self.name}' initialized successfully",
+            extra={"agent_name": self.name}
+        )
     
     # =========================================================================
     # PROPERTIES - Clean interface for agent information
@@ -294,7 +293,11 @@ class BaseAgent(ABC, Generic[ConfigType]):
                 self._metrics.failed_requests += 1
                 
             self._status = AgentStatus.ERROR
-            logger.error(f"Agent {self.name} processing failed: {e}")
+            self._logger.log_structured(
+                level="ERROR",
+                message=f"Agent {self.name} processing failed: {e}",
+                extra={"agent_name": self.name}
+            )
             
             # Return error response
             return AgentResponse(
@@ -365,14 +368,22 @@ class BaseAgent(ABC, Generic[ConfigType]):
         try:
             yield
         except Exception as e:
-            logger.error(f"Error in {operation}: {e}")
+            self._logger.log_structured(
+                level="ERROR",
+                message=f"Error in {operation}: {e}",
+                extra={"agent_name": self.name}
+            )
             if self._metrics:
                 self._metrics.failed_requests += 1
             raise
     
     def _log_handler(self, message: Any) -> None:
         """Handle log messages (can be overridden for custom logging)."""
-        print(message)  # Default implementation
+        self._logger.log_structured(
+            level="INFO",
+            message=str(message),
+            extra={"agent_name": self.name}
+        )
     
     def setup_enhanced_logging(self, websocket: Optional[Any] = None, stream_output: Optional[Callable] = None) -> None:
         """
@@ -389,20 +400,28 @@ class BaseAgent(ABC, Generic[ConfigType]):
             stream_output: Function to handle websocket output
         """
         try:
-            from planner_agent.utils.logger import AgentLogger
-            
             # Create enhanced logger with agent-specific colors
             self._enhanced_logger = AgentLogger(self.name)
-            
             # Set up websocket streaming if provided
             if websocket and stream_output:
                 self._enhanced_logger.set_websocket(websocket, stream_output)
-                logger.info(f"Enhanced logging with websocket streaming enabled for {self.name}")
+                self._logger.log_structured(
+                    level="INFO",
+                    message=f"Enhanced logging with websocket streaming enabled for {self.name}",
+                    extra={"agent_name": self.name}
+                )
             else:
-                logger.info(f"Enhanced visual logging enabled for {self.name}")
-                
+                self._logger.log_structured(
+                    level="INFO",
+                    message=f"Enhanced visual logging enabled for {self.name}",
+                    extra={"agent_name": self.name}
+                )
         except ImportError:
-            logger.warning("AgentLogger not available - using standard logging only")
+            self._logger.log_structured(
+                level="WARNING",
+                message="AgentLogger not available - using standard logging only",
+                extra={"agent_name": self.name}
+            )
             self._enhanced_logger = None
     
     async def log_enhanced(self, message: str, level: str = "INFO") -> None:
@@ -422,9 +441,12 @@ class BaseAgent(ABC, Generic[ConfigType]):
             # Use enhanced logger for visual/streaming output
             await self._enhanced_logger.log(message, level)
         else:
-            # Fallback to standard loguru logging
-            log_method = getattr(logger, level.lower(), logger.info)
-            log_method(f"[{self.name}] {message}")
+            # Fallback to centralized logger
+            self._logger.log_structured(
+                level=level,
+                message=message,
+                extra={"agent_name": self.name}
+            )
     
     def get_logging_context(self) -> Dict[str, Any]:
         """
@@ -452,7 +474,11 @@ class BaseAgent(ABC, Generic[ConfigType]):
         Override to add custom cleanup logic.
         """
         self._status = AgentStatus.SHUTDOWN
-        logger.info(f"Agent '{self.name}' shutting down")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"Agent '{self.name}' shutting down",
+            extra={"agent_name": self.name}
+        )
     
     def __str__(self) -> str:
         """String representation of the agent."""
@@ -510,7 +536,11 @@ class MultiAgentCoordinator(BaseAgent[AgentConfig]):
     def register_agent(self, name: str, agent: 'BaseAgent') -> None:
         """Register a sub-agent."""
         self._sub_agents[name] = agent
-        logger.info(f"Registered sub-agent '{name}' in coordinator '{self.name}'")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"Registered sub-agent '{name}' in coordinator '{self.name}'",
+            extra={"agent_name": self.name, "sub_agent": name}
+        )
     
     def get_agent(self, name: str) -> Optional['BaseAgent']:
         """Get a registered sub-agent."""

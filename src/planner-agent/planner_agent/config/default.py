@@ -24,6 +24,9 @@ class DefaultConfig:
     LOG_FILE: str = "planner_agent.log"
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     LOG_DATE_FORMAT: str = "%Y-%m-%d %H:%M:%S"
+    LOG_TO_CONSOLE: bool = True
+    LOG_TO_FILE: bool = True
+    LOG_STRUCTURED_JSON: bool = False
     AGENTS_MCP_SERVER_HOST: str = "localhost"
     AGENTS_MCP_SERVER_PORT: int = 8080
     AGENTS_MCP_SERVER_TRANSPORT: str = "sse"

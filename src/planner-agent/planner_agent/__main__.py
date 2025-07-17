@@ -27,10 +27,10 @@ import sys
 
 from pathlib import Path
 from planner_agent.utils.exceptions import ConfigError
+from planner_agent.utils.logger import AgentLogger
 
 import click
 import httpx
-from loguru import logger
 import uvicorn
 
 from a2a.server.apps import A2AStarletteApplication
@@ -49,6 +49,7 @@ def main(host: str, port: int, agent_card: str) -> None:
     """
     Main entry point for the Planner Agent server.
     """
+    logger = AgentLogger("PLANNER_AGENT")
     try:
         if not agent_card:
             raise ConfigError('Agent card is required')
@@ -64,16 +65,20 @@ def main(host: str, port: int, agent_card: str) -> None:
         server: A2AStarletteApplication = A2AStarletteApplication(
             agent_card=agent_card_obj, http_handler=request_handler
         )
-        logger.info(f'Starting Planner Agent server on {host}:{port}')
+        logger._log_to_console(f'Starting Planner Agent server on {host}:{port}', level="INFO")
+        logger._log_to_file(f'Starting Planner Agent server on {host}:{port}', level="INFO")
         uvicorn.run(server.build(), host=host, port=port)
     except FileNotFoundError:
-        logger.error(f"Error: File '{agent_card}' not found.")
+        logger._log_to_console(f"Error: File '{agent_card}' not found.", level="ERROR")
+        logger._log_to_file(f"Error: File '{agent_card}' not found.", level="ERROR")
         sys.exit(1)
     except json.JSONDecodeError:
-        logger.error(f"Error: File '{agent_card}' contains invalid JSON.")
+        logger._log_to_console(f"Error: File '{agent_card}' contains invalid JSON.", level="ERROR")
+        logger._log_to_file(f"Error: File '{agent_card}' contains invalid JSON.", level="ERROR")
         sys.exit(1)
     except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
+        logger._log_to_console(f'An error occurred during server startup: {e}', level="ERROR")
+        logger._log_to_file(f'An error occurred during server startup: {e}', level="ERROR")
         sys.exit(1)
 if __name__ == '__main__':
     main()

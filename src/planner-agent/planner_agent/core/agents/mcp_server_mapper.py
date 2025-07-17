@@ -22,7 +22,7 @@ import json
 from langgraph.types import Command
 from planner_agent.models.agent_state import MultiAgentState
 from planner_agent.core.base_agent import MultiAgentCoordinator, AgentConfig, AgentCapability
-from planner_agent.utils.logger import log_sync, log_async
+from planner_agent.utils.logger import log_sync, log_async, AgentLogger
 from planner_agent.prompts.prompts import AGENT_SKILL_TO_MCP_SERVER_MAPPER_PROMPT
 from planner_agent.utils.mcp_agent_client import create_mcp_client
 from planner_agent.config import Config
@@ -67,6 +67,7 @@ class MCPNodeMapper(MultiAgentCoordinator):
         self._websocket = websocket
         self._stream_output = stream_output
         self._llm_model = llm_model
+        self._logger = AgentLogger("mcp_server_mapper")
         
         super().__init__(config=agent_config, **kwargs)
 
@@ -88,9 +89,14 @@ class MCPNodeMapper(MultiAgentCoordinator):
         """Create a prompt template for the agent selection chain of thought."""
         return ChatPromptTemplate.from_template(AGENT_SKILL_TO_MCP_SERVER_MAPPER_PROMPT)
 
-    @log_async
     async def node_stream(self, state: MultiAgentState) -> MultiAgentState:
-        await self.log_enhanced(f"DEBUG: [mcp_server_mapper.node_stream] START state={state}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message="[mcp_server_mapper.node_stream] START",
+            task_id=getattr(state, 'task_id', None),
+            context_id=getattr(state, 'context_id', None),
+            extra={"agent_name": self.__class__.__name__, "state": str(state)}
+        )
         # HITL resume logic
         if state.status == "input_required":
             if state.resume_value is not None:
@@ -100,23 +106,47 @@ class MCPNodeMapper(MultiAgentCoordinator):
                 state.status = None
             else:
                 interrupt({"question": state.question})
-                await self.log_enhanced(f"DEBUG: [mcp_server_mapper.node_stream] END (interrupt) state={state}", "INFO")
+                self._logger.log_structured(
+                    level="INFO",
+                    message="[mcp_server_mapper.node_stream] END (interrupt)",
+                    task_id=getattr(state, 'task_id', None),
+                    context_id=getattr(state, 'context_id', None),
+                    extra={"agent_name": self.__class__.__name__, "state": str(state)}
+                )
                 return state
         state_dict = state.model_dump() if hasattr(state, 'model_dump') else dict(state)
         for k, v in state_dict.items():
-            await self.log_enhanced(f"[MCP_SERVER_MAPPER] state[{k}] = {v}", "INFO")
+            self._logger.log_structured(
+                level="INFO",
+                message=f"[MCP_SERVER_MAPPER] state[{k}] = {v}",
+                task_id=getattr(state, 'task_id', None),
+                context_id=getattr(state, 'context_id', None),
+                extra={"agent_name": self.__class__.__name__}
+            )
         query = cast(str, getattr(state, "user_query", ""))
         session_id = cast(str, getattr(state, "context_id", ""))
         task_id = cast(str, getattr(state, "task_id", ""))
         selected_agent = cast(List[Dict[str, Any]], getattr(state, "selected_agent", []))
         task_list = cast(List[str], getattr(state, "refined_task_list", []))
         result = await self.stream(query, session_id, task_id, task_list, selected_agent, state)
-        await self.log_enhanced(f"DEBUG: [mcp_server_mapper.node_stream] END state={result}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message="[mcp_server_mapper.node_stream] END",
+            task_id=getattr(state, 'task_id', None),
+            context_id=getattr(state, 'context_id', None),
+            extra={"agent_name": self.__class__.__name__, "result": str(result)}
+        )
         return result
 
     @log_async
     async def stream(self, query: str, session_id: str, task_id: str, task_list: List[str], selected_agent: List[Dict[str, Any]], state: MultiAgentState) -> MultiAgentState:
-        await self.log_enhanced(f"DEBUG: [mcp_server_mapper.stream] START query={query}, session_id={session_id}, task_id={task_id}, task_list={task_list}, selected_agent={selected_agent}, state={state}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message="[mcp_server_mapper.stream] START",
+            task_id=task_id,
+            context_id=session_id,
+            extra={"agent_name": self.__class__.__name__, "query": query, "task_list": str(task_list), "selected_agent": str(selected_agent), "state": str(state)}
+        )
         try:
             prompt_template = self._create_prompt_template()
             async with create_mcp_client(
@@ -125,8 +155,20 @@ class MCPNodeMapper(MultiAgentCoordinator):
                 transport=self._mcp_planner_config._config.get("AGENTS_MCP_SERVER_TRANSPORT", "sse")
             ) as mcp_client:
                 tools = mcp_client.get_tools()
-                await self.log_enhanced(f"MCP Server selection Partial: {query}", "INFO")
-                await self.log_enhanced(f"MCP Server tools list: {tools}", "INFO")
+                self._logger.log_structured(
+                    level="INFO",
+                    message="MCP Server selection Partial",
+                    task_id=task_id,
+                    context_id=session_id,
+                    extra={"agent_name": self.__class__.__name__, "query": query}
+                )
+                self._logger.log_structured(
+                    level="INFO",
+                    message="MCP Server tools list",
+                    task_id=task_id,
+                    context_id=session_id,
+                    extra={"agent_name": self.__class__.__name__, "tools": str(tools)}
+                )
 
                 # Build agent_list with agent_name and their capability_list (skill ids)
                 agent_list = []
@@ -144,7 +186,13 @@ class MCPNodeMapper(MultiAgentCoordinator):
                         "capability_list": capability_list
                     })
 
-                await self.log_enhanced(f"Extracted agent_list: {agent_list}", "INFO")
+                self._logger.log_structured(
+                    level="INFO",
+                    message="Extracted agent_list",
+                    task_id=task_id,
+                    context_id=session_id,
+                    extra={"agent_name": self.__class__.__name__, "agent_list": str(agent_list)}
+                )
                 system_content = prompt_template.format(agent_list=agent_list)
                 if not isinstance(system_content, str) and hasattr(system_content, 'to_string'):
                     system_content = system_content.to_string()
@@ -161,7 +209,13 @@ class MCPNodeMapper(MultiAgentCoordinator):
                     "agent_list": agent_list
                 }
                 response = await agent.ainvoke(agent_state)
-                await self.log_enhanced(f"🔍 Agent selection response: {response}", "INFO")
+                self._logger.log_structured(
+                    level="INFO",
+                    message="Agent selection response",
+                    task_id=task_id,
+                    context_id=session_id,
+                    extra={"agent_name": self.__class__.__name__, "response": str(response)}
+                )
                 message = response['messages'][-1]
                 if isinstance(message, AIMessage):
                     content = message.content
@@ -209,11 +263,23 @@ class MCPNodeMapper(MultiAgentCoordinator):
                     state.next = "__end__"
                     state.status = "failed"
                     state.final_response = structured_response.model_dump()
-                await self.log_enhanced(f"DEBUG: [mcp_server_mapper.stream] END state={state}", "INFO")
+                self._logger.log_structured(
+                    level="INFO",
+                    message="[mcp_server_mapper.stream] END",
+                    task_id=task_id,
+                    context_id=session_id,
+                    extra={"agent_name": self.__class__.__name__, "state": str(state)}
+                )
                 return state
         except Exception as e:
             tb = traceback.format_exc()
-            await self.log_enhanced(f"💥 Stream Error: {str(e)}\nTraceback:\n{tb}", "ERROR")
+            self._logger.log_structured(
+                level="ERROR",
+                message="Stream Error",
+                task_id=task_id,
+                context_id=session_id,
+                extra={"agent_name": self.__class__.__name__, "error": str(e), "traceback": tb}
+            )
             state.next = "__end__"
             state.status = "failed"
             state.final_response = {
@@ -222,5 +288,11 @@ class MCPNodeMapper(MultiAgentCoordinator):
                         "original_query": query,
                         "status": "failed"
             }
-            await self.log_enhanced(f"DEBUG: [mcp_server_mapper.stream] END (exception) state={state}", "INFO")
+            self._logger.log_structured(
+                level="INFO",
+                message="[mcp_server_mapper.stream] END (exception)",
+                task_id=task_id,
+                context_id=session_id,
+                extra={"agent_name": self.__class__.__name__, "state": str(state)}
+            )
             return state
