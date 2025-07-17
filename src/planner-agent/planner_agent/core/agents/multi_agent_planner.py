@@ -37,6 +37,7 @@ from langgraph.prebuilt import create_react_agent
 from langchain.prompts import ChatPromptTemplate
 import json
 from planner_agent.config import Config
+from planner_agent.utils.exceptions import ConfigError
 from planner_agent.core.base_agent import MultiAgentCoordinator, AgentConfig, AgentResponse, AgentCapability
 from planner_agent.core.llm.llm_provider import LLMProvider
 from planner_agent.models.agent_state import MultiAgentState, TaskDecomposition
@@ -111,7 +112,7 @@ class MultiAgentPlanner(MultiAgentCoordinator):
             # logger.info('LLM initialized successfully')
         except Exception as e:
             # logger.error(f'Failed to initialize LLM: {e}')
-            raise ValueError(f"LLM initialization failed: {e}")
+            raise ConfigError(f"LLM initialization failed: {e}")
         
         self.a2a_agent_mapper = A2AAgentCardMapper(self.model)
         self.mcp_server_mapper = MCPNodeMapper(self.model)

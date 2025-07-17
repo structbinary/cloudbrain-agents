@@ -26,6 +26,7 @@ import logging
 import sys
 
 from pathlib import Path
+from planner_agent.utils.exceptions import ConfigError
 
 import click
 import httpx
@@ -50,7 +51,7 @@ def main(host: str, port: int, agent_card: str) -> None:
     """
     try:
         if not agent_card:
-            raise ValueError('Agent card is required')
+            raise ConfigError('Agent card is required')
         with Path(agent_card).open() as file:
             data = json.load(file)
         agent_card_obj: AgentCard = AgentCard(**data)

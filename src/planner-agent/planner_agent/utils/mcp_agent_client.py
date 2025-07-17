@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Union
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_core.tools import BaseTool
+from planner_agent.utils.exceptions import ConfigError, PlannerAgentError
 
 
 class MCPAdapterClient:
@@ -114,7 +115,9 @@ class MCPAdapterClient:
         """Execute a tool with the given arguments."""
         tool = self._get_tool(tool_name)
         if not tool:
-            raise ValueError(f"Tool '{tool_name}' not found. Available tools: {list(self._tool_map.keys())}")
+            raise ConfigError(
+                "No tools available. Ensure MCP server is running and tools are registered."
+            )
         
         try:
             # Execute the tool using LangChain's tool interface
@@ -129,7 +132,7 @@ class MCPAdapterClient:
             
             return result
         except Exception as e:
-            raise Exception(f"Error executing tool '{tool_name}': {str(e)}")
+            raise PlannerAgentError(f"Error executing tool '{tool_name}': {str(e)}")
     
     async def list_agents(self) -> List[Dict[str, Any]]:
         """

@@ -75,10 +75,8 @@ class LLMProvider:
                 timeout=timeout,
                 **kwargs
             )
-        except ImportError as e:
-            raise LLMConfigurationError(
-                f"Required package not installed for provider '{provider}': {e}"
-            )
+        except LLMConfigurationError as e:
+            raise e
         except Exception as e:
             raise LLMConfigurationError(
                 f"Failed to create LLM for provider '{provider}': {e}"
@@ -90,7 +88,7 @@ class LLMProvider:
         try:
             __import__(package_name)
         except ImportError:
-            raise ImportError(
+            raise LLMConfigurationError(
                 f"{package_name} package is required for {provider_name} provider. "
                 f"Install with: pip install {package_name}"
             )

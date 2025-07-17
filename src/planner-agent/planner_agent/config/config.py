@@ -19,6 +19,7 @@ import os
 import warnings
 from typing import Dict, Any, List, Union, Type, get_origin, get_args, Optional, Tuple
 from planner_agent.config.default import DefaultConfig
+from planner_agent.utils.exceptions import ConfigError
 from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
@@ -111,9 +112,9 @@ class Config:
                 else:
                     try:
                         return Config.convert_env_value(key, env_value, arg)
-                    except ValueError:
+                    except Exception:
                         continue
-            raise ValueError(f"Cannot convert {env_value} to any of {args}")
+            raise ConfigError(f"Cannot convert {env_value} to any of {args}")
 
         if type_hint is bool:
             return env_value.lower() in ("true", "1", "yes", "on")
@@ -126,7 +127,7 @@ class Config:
         elif origin is list or origin is List:
             return json.loads(env_value)
         else:
-            raise ValueError(f"Unsupported type {type_hint} for key {key}")
+            raise ConfigError(f"Unsupported type {type_hint} for key {key}")
 
     @classmethod
     def load_config(cls, config_path: str) -> Dict[str, Any]:

@@ -25,6 +25,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, AsyncIterable, TypeVar, Generic, Union, Protocol, Callable, AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
+from planner_agent.utils.exceptions import ConfigError
 from loguru import logger
 import asyncio
 from contextlib import asynccontextmanager
@@ -88,11 +89,11 @@ class AgentConfig:
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         if not self.name.strip():
-            raise ValueError("Agent name cannot be empty")
+            raise ConfigError("Agent name cannot be empty")
         if self.max_retries < 0:
-            raise ValueError("max_retries must be non-negative")
+            raise ConfigError("max_retries must be non-negative")
         if self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
+            raise ConfigError("timeout_seconds must be positive")
 
 
 class StreamingProtocol(Protocol):
