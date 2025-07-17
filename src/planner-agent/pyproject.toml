@@ -1,0 +1,30 @@
+[project]
+name = "planner-agent"
+version = "0.1.0"
+description = "Planner Agent"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "a2a-sdk==0.2.9",
+    "asyncclick>=8.1.8",
+    "colorama>=0.4.6",
+    "httpx>=0.28.1",
+    "langchain>=0.3.26",
+    "langchain-community>=0.3.27",
+    "langchain-core>=0.3.68",
+    "langchain-mcp-adapters>=0.1.0",
+    "langchain-openai>=0.3.27",
+    "langgraph>=0.5.1",
+    "loguru>=0.7.3",
+    "pydantic>=2.11.7",
+    "pydantic-settings>=2.10.1",
+    "pynacl>=1.5.0",
+    "python-dotenv>=1.1.1",
+]
+
+[project.scripts]
+planner_agent = "planner_agent.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
