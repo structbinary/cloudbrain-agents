@@ -1,3 +1,8 @@
+"""
+planner_agent package initialization.
+
+This package contains the core modules, utilities, and configuration for the Planner Agent system.
+"""
 # Copyright (C) 2025 StructBinary
 #
 # This program is free software; you can redistribute it and/or modify

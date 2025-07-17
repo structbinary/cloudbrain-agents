@@ -1,3 +1,8 @@
+"""
+Core subpackage for Planner Agent.
+
+Contains agent base classes, executors, and core agent logic.
+"""
 # Copyright (C) 2025 StructBinary
 #
 # This program is free software; you can redistribute it and/or modify
