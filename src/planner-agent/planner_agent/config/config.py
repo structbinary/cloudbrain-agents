@@ -25,12 +25,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    """Configuration class for Planner Agent."""
+    """
+    Configuration class for Planner Agent.
+
+    Precedence order for config values:
+    1. Defaults from DefaultConfig
+    2. Environment variables (including .env)
+    3. Runtime/programmatic overrides (via config dict)
+
+    All config keys are available as attributes and in the internal _config dict.
+    """
 
     def __init__(self, config: Dict[str, Any] = {}) -> None:
-        """Initialize the configuration.
+        """
+        Initialize the configuration.
         Args:
-            config: Optional configuration dictionary to override defaults
+            config: Optional configuration dictionary to override defaults (highest precedence)
         """
         # Start with default configuration
         default_config = {key: getattr(DefaultConfig, key) for key in dir(DefaultConfig) if not key.startswith('_')}
@@ -44,8 +54,10 @@ class Config:
     
 
     def _set_attributes(self, config: Dict[str, Any]) -> None:
-        """Set attributes from configuration.
-        
+        """
+        Set attributes from configuration and environment variables.
+        Environment variables take precedence over defaults and runtime config.
+        Updates both attributes and the internal _config dict.
         Args:
             config: Configuration dictionary
         """
@@ -54,6 +66,16 @@ class Config:
             if env_value is not None:
                 value = self.convert_env_value(key, env_value, DefaultConfig.__annotations__[key])
             setattr(self, key.lower(), value)
+            self._config[key] = value  # Ensure internal dict reflects env override
+
+    def __getattr__(self, item: str) -> Any:
+        """
+        Allow attribute-style access to config keys.
+        Raises AttributeError if the key is missing.
+        """
+        if item in self._config:
+            return self._config[item]
+        raise AttributeError(f"'Config' object has no attribute '{item}'")
 
     @property
     def llm_config(self) -> Dict[str, Any]:
