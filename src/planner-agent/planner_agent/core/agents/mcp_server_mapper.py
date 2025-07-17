@@ -83,11 +83,7 @@ class MCPNodeMapper(MultiAgentCoordinator):
     @log_sync
     def _initialize_agent(self, **kwargs: Any) -> None:
         """Initialize multi-agent planner specific components."""
-        if self._enable_visual_logging:
-            self.setup_enhanced_logging(
-                websocket=self._websocket,
-                stream_output=self._stream_output
-            )
+        # Remove enhanced logging setup
         # self.available_tools = self._mcp_client.get_available_tools()
 
 

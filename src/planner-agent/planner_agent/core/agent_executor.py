@@ -16,6 +16,7 @@
 
 from planner_agent.utils.logger import AgentLogger
 import inspect
+import abc
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -41,7 +42,26 @@ from typing import cast, Any
 logger = AgentLogger("GENERIC_AGENT_EXECUTOR")
 
 
-class GenericAgentExecutor(AgentExecutor):
+class ExecutorValidationMixin(abc.ABC):
+    """
+    Mixin to enforce extra validation/status mapping methods for all custom executors.
+    """
+    @abc.abstractmethod
+    def _validate_request(self, context: RequestContext) -> bool:
+        """
+        Validate the incoming request context. Return True if invalid, False if valid.
+        """
+        pass
+
+    @abc.abstractmethod
+    def _map_status_to_task_state(self, custom_status: str) -> TaskState:
+        """
+        Map custom status strings to A2A TaskState enum values.
+        """
+        pass
+
+
+class GenericAgentExecutor(AgentExecutor, ExecutorValidationMixin):
     """AgentExecutor used by the tragel agents with JSON-RPC 2.0 validation support."""
 
     def __init__(self, agent: BaseAgent) -> None:
@@ -235,12 +255,22 @@ class GenericAgentExecutor(AgentExecutor):
             )
             raise
 
+    async def cancel(self, request: RequestContext, event_queue: EventQueue) -> Task | None:
+        """
+        Cancel the current agent execution if possible. Default implementation returns None.
+        """
+        return None
 
     def _validate_request(self, context: RequestContext) -> bool:
+        """
+        Validate the incoming request context. Default implementation returns False (valid).
+        """
         return False
 
     def _map_status_to_task_state(self, custom_status: str) -> TaskState:
-        """Map custom status strings to A2A TaskState enum values."""
+        """
+        Map custom status strings to A2A TaskState enum values. Can be overridden by subclasses.
+        """
         status_mapping: dict[str, TaskState] = {
             'working': TaskState.working,
             'input_required': TaskState.input_required,
@@ -248,14 +278,5 @@ class GenericAgentExecutor(AgentExecutor):
             'failed': TaskState.failed,
             'error': TaskState.failed,
             'submitted': TaskState.submitted,
-            'canceled': TaskState.canceled,
-            'rejected': TaskState.rejected,
-            'auth_required': TaskState.auth_required,
-            'unknown': TaskState.unknown
         }
         return status_mapping.get(custom_status, TaskState.working)
-
-    async def cancel(
-        self, request: RequestContext, event_queue: EventQueue
-    ) -> Task | None:
-        raise ServerError(error=UnsupportedOperationError())

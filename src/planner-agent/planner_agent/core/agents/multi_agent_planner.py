@@ -104,11 +104,6 @@ class MultiAgentPlanner(MultiAgentCoordinator):
     @log_sync
     def _initialize_agent(self, **kwargs: Any) -> None:
         """Initialize multi-agent planner specific components using injected dependencies."""
-        if self._enable_visual_logging:
-            self.setup_enhanced_logging(
-                websocket=self._websocket,
-                stream_output=self._stream_output
-            )
         # Initialize LLM if not injected
         if self.model is None:
             try:
@@ -434,7 +429,13 @@ class MultiAgentPlanner(MultiAgentCoordinator):
                         }
                     )
         except Exception as e:
-            await self.log_enhanced(f"💥 Stream Error: {str(e)}", "ERROR")
+            self._logger.log_structured(
+                level="ERROR",
+                message=f"\uD83D\uDCA5 Stream Error: {str(e)}",
+                task_id=task_id,
+                context_id=session_id,
+                extra={"agent_name": self.__class__.__name__, "error_type": type(e).__name__}
+            )
             yield AgentResponse(
                 response_type='error',
                 is_task_complete=True,
@@ -449,5 +450,11 @@ class MultiAgentPlanner(MultiAgentCoordinator):
                     'step_count': step_count
                 }
             )
-        await self.log_enhanced(f"DEBUG: [stream] END session_id={session_id}, task_id={task_id}", "INFO")
+        self._logger.log_structured(
+            level="INFO",
+            message=f"DEBUG: [stream] END session_id={session_id}, task_id={task_id}",
+            task_id=task_id,
+            context_id=session_id,
+            extra={"agent_name": self.__class__.__name__}
+        )
 

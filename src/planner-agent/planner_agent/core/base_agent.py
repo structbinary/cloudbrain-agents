@@ -121,17 +121,12 @@ class AgentResponse(BaseModel):
 class BaseAgent(ABC, Generic[ConfigType]):
     """
     Abstract base class for all agent implementations.
-    
-    This class provides a robust foundation following these architectural principles:
-    - Single Responsibility: Each agent has one clear purpose
-    - Open/Closed: Open for extension, closed for modification
-    - Interface Segregation: Clean, focused interfaces
-    - Dependency Inversion: Depend on abstractions
-    
-    Design Patterns Used:
-    - Template Method: Common workflow with customizable steps
-    - Strategy: Pluggable behavior through abstract methods
-    - Observer: Optional event notification system
+
+    Enforced interface:
+    - def _initialize_agent(self, **kwargs: Any) -> None:  # Abstract, must be implemented by all agents
+    - async def stream(self, query: str, session_id: str, task_id: str) -> AsyncIterable[AgentResponse]:  # Abstract, must be implemented by all agents
+
+    All other methods are optional hooks or template methods for convenience and extension.
     """
     
     def __init__(self, config: Union[AgentConfig, Dict[str, Any]], **kwargs: Any) -> None:
@@ -204,7 +199,6 @@ class BaseAgent(ABC, Generic[ConfigType]):
     # =========================================================================
     # ABSTRACT METHODS - Must be implemented by subclasses
     # =========================================================================
-    # @log_sync
     @abstractmethod
     def _initialize_agent(self, **kwargs: Any) -> None:
         """
@@ -215,10 +209,10 @@ class BaseAgent(ABC, Generic[ConfigType]):
         
         Args:
             **kwargs: Additional initialization parameters
+        Must be implemented by all agent subclasses.
         """
         pass
     
-    # @log_async
     @abstractmethod
     async def stream(self, query: str, session_id: str, task_id: str) -> AsyncIterable[AgentResponse]:
         """
@@ -231,6 +225,7 @@ class BaseAgent(ABC, Generic[ConfigType]):
             
         Yields:
             AgentResponse: Streaming response objects
+        Must be implemented by all agent subclasses.
         """
         pass
     
@@ -385,69 +380,6 @@ class BaseAgent(ABC, Generic[ConfigType]):
             extra={"agent_name": self.name}
         )
     
-    def setup_enhanced_logging(self, websocket: Optional[Any] = None, stream_output: Optional[Callable] = None) -> None:
-        """
-        Set up enhanced logging with custom AgentLogger integration.
-        
-        Use this when you need:
-        - Colored console output
-        - Multi-channel logging (console + file + websocket)
-        - Real-time streaming to web dashboards
-        - Agent-specific visual formatting
-        
-        Args:
-            websocket: WebSocket connection for real-time streaming
-            stream_output: Function to handle websocket output
-        """
-        try:
-            # Create enhanced logger with agent-specific colors
-            self._enhanced_logger = AgentLogger(self.name)
-            # Set up websocket streaming if provided
-            if websocket and stream_output:
-                self._enhanced_logger.set_websocket(websocket, stream_output)
-                self._logger.log_structured(
-                    level="INFO",
-                    message=f"Enhanced logging with websocket streaming enabled for {self.name}",
-                    extra={"agent_name": self.name}
-                )
-            else:
-                self._logger.log_structured(
-                    level="INFO",
-                    message=f"Enhanced visual logging enabled for {self.name}",
-                    extra={"agent_name": self.name}
-                )
-        except ImportError:
-            self._logger.log_structured(
-                level="WARNING",
-                message="AgentLogger not available - using standard logging only",
-                extra={"agent_name": self.name}
-            )
-            self._enhanced_logger = None
-    
-    async def log_enhanced(self, message: str, level: str = "INFO") -> None:
-        """
-        Log message using enhanced logger if available, fallback to standard.
-        
-        This method provides:
-        - Colored console output (if enhanced logger available)
-        - Multi-channel logging (console + file + websocket)
-        - Automatic fallback to standard logging
-        
-        Args:
-            message: Message to log
-            level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        """
-        if hasattr(self, '_enhanced_logger') and self._enhanced_logger:
-            # Use enhanced logger for visual/streaming output
-            await self._enhanced_logger.log(message, level)
-        else:
-            # Fallback to centralized logger
-            self._logger.log_structured(
-                level=level,
-                message=message,
-                extra={"agent_name": self.name}
-            )
-    
     def get_logging_context(self) -> Dict[str, Any]:
         """
         Get current logging context and capabilities.
@@ -458,12 +390,8 @@ class BaseAgent(ABC, Generic[ConfigType]):
         return {
             "agent_name": self.name,
             "standard_logging": True,
-            "enhanced_logging": hasattr(self, '_enhanced_logger') and self._enhanced_logger is not None,
-            "websocket_streaming": (
-                hasattr(self, '_enhanced_logger') and 
-                self._enhanced_logger and 
-                self._enhanced_logger.websocket is not None
-            ),
+            "enhanced_logging": False, # Enhanced logging is now handled by AgentLogger
+            "websocket_streaming": False, # Websocket streaming is now handled by AgentLogger
             "log_level": self._config.log_level if self._config.enable_logging else "DISABLED"
         }
     

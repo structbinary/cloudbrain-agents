@@ -18,6 +18,113 @@ import os
 from typing import Optional, Dict, Any, Callable
 from langchain_core.runnables import Runnable
 from planner_agent.utils.exceptions import UnsupportedProviderError, LLMConfigurationError
+from .base_llm_provider import BaseLLMProvider
+
+
+class OpenAIProvider(BaseLLMProvider):
+    """
+    Concrete LLM provider for OpenAI models.
+    Implements the BaseLLMProvider interface.
+    """
+    def create_llm(
+        self,
+        model: str,
+        temperature: float = 0.1,
+        max_tokens: Optional[int] = None,
+        timeout: int = 60,
+        **kwargs: Any
+    ) -> Runnable:
+        LLMProvider._check_package("langchain_openai", "OpenAI")
+        from langchain_openai import ChatOpenAI
+        api_key = kwargs.pop('api_key', None) or os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            raise LLMConfigurationError(
+                "OpenAI API key not found. Set OPENAI_API_KEY environment variable "
+                "or pass api_key parameter."
+            )
+        config = {
+            "model": model,
+            "temperature": temperature,
+            "openai_api_key": api_key,
+        }
+        if max_tokens is not None:
+            config["max_tokens"] = max_tokens
+        if kwargs.get('base_url'):
+            config["openai_api_base"] = kwargs.pop('base_url')
+        if kwargs.get('organization'):
+            config["openai_organization"] = kwargs.pop('organization')
+        config.update(kwargs)
+        return ChatOpenAI(**config)
+
+
+class AnthropicProvider(BaseLLMProvider):
+    """
+    Concrete LLM provider for Anthropic models.
+    Implements the BaseLLMProvider interface.
+    """
+    def create_llm(
+        self,
+        model: str,
+        temperature: float = 0.1,
+        max_tokens: Optional[int] = None,
+        timeout: int = 60,
+        **kwargs: Any
+    ) -> Runnable:
+        LLMProvider._check_package("langchain_anthropic", "Anthropic")
+        from langchain_anthropic import ChatAnthropic  # type: ignore
+        api_key = kwargs.pop('api_key', None) or os.getenv('ANTHROPIC_API_KEY')
+        if not api_key:
+            raise LLMConfigurationError(
+                "Anthropic API key not found. Set ANTHROPIC_API_KEY environment variable "
+                "or pass api_key parameter."
+            )
+        config = {
+            "model": model,
+            "temperature": temperature,
+            "anthropic_api_key": api_key,
+        }
+        if max_tokens is not None:
+            config["max_tokens"] = max_tokens
+        config.update(kwargs)
+        return ChatAnthropic(**config)
+
+
+class AzureOpenAIProvider(BaseLLMProvider):
+    """
+    Concrete LLM provider for Azure OpenAI models.
+    Implements the BaseLLMProvider interface.
+    """
+    def create_llm(
+        self,
+        model: str,
+        temperature: float = 0.1,
+        max_tokens: Optional[int] = None,
+        timeout: int = 60,
+        **kwargs: Any
+    ) -> Runnable:
+        LLMProvider._check_package("langchain_openai", "Azure OpenAI")
+        from langchain_openai import ChatOpenAI
+        api_key = kwargs.pop('api_key', None) or os.getenv('AZURE_OPENAI_API_KEY')
+        endpoint = kwargs.pop('endpoint', None) or os.getenv('AZURE_OPENAI_ENDPOINT')
+        if not api_key or not endpoint:
+            raise LLMConfigurationError(
+                "Azure OpenAI API key or endpoint not found. Set AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT "
+                "environment variables or pass api_key and endpoint parameters."
+            )
+        config = {
+            "model": model,
+            "temperature": temperature,
+            "openai_api_key": api_key,
+            "openai_api_base": endpoint,
+        }
+        if max_tokens is not None:
+            config["max_tokens"] = max_tokens
+        if kwargs.get('api_version'):
+            config["openai_api_version"] = kwargs.pop('api_version')
+        if kwargs.get('deployment_name'):
+            config["azure_deployment"] = kwargs.pop('deployment_name')
+        config.update(kwargs)
+        return ChatOpenAI(**config)
 
 
 class LLMProvider:
@@ -107,7 +214,7 @@ class LLMProvider:
         All LangChain chat models are Runnables by default.
         """
         if provider == "openai":
-            return LLMProvider._create_openai_llm(
+            return OpenAIProvider().create_llm(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -115,7 +222,7 @@ class LLMProvider:
                 **kwargs
             )
         elif provider == "anthropic":
-            return LLMProvider._create_anthropic_llm(
+            return AnthropicProvider().create_llm(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -123,7 +230,7 @@ class LLMProvider:
                 **kwargs
             )
         elif provider == "azure_openai":
-            return LLMProvider._create_azure_openai_llm(
+            return AzureOpenAIProvider().create_llm(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -133,136 +240,6 @@ class LLMProvider:
         else:
             # This should never happen due to validation above
             raise UnsupportedProviderError(f"Provider '{provider}' not implemented")
-    
-    @staticmethod
-    def _create_openai_llm(
-        model: str,
-        temperature: float,
-        max_tokens: Optional[int],
-        timeout: int,
-        **kwargs: Any
-    ) -> Runnable:
-        """Create OpenAI LLM instance (returns a Runnable)."""
-        LLMProvider._check_package("langchain_openai", "OpenAI")
-        
-        from langchain_openai import ChatOpenAI
-        
-        # Get API key from kwargs or environment
-        api_key = kwargs.pop('api_key', None) or os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            raise LLMConfigurationError(
-                "OpenAI API key not found. Set OPENAI_API_KEY environment variable "
-                "or pass api_key parameter."
-            )
-        
-        # Build configuration with proper parameter names
-        config = {
-            "model": model,
-            "temperature": temperature,
-            "openai_api_key": api_key,
-        }
-        
-        # Add optional parameters with correct naming
-        if max_tokens is not None:
-            config["max_tokens"] = max_tokens
-        if kwargs.get('base_url'):
-            config["openai_api_base"] = kwargs.pop('base_url')
-        if kwargs.get('organization'):
-            config["openai_organization"] = kwargs.pop('organization')
-        
-        # Add any remaining kwargs
-        config.update(kwargs)
-        
-        # ChatOpenAI is a Runnable by default
-        return ChatOpenAI(**config)
-    
-    @staticmethod
-    def _create_anthropic_llm(
-        model: str,
-        temperature: float,
-        max_tokens: Optional[int],
-        timeout: int,
-        **kwargs: Any
-    ) -> Runnable:
-        """Create Anthropic LLM instance (returns a Runnable)."""
-        LLMProvider._check_package("langchain_anthropic", "Anthropic")
-        
-        from langchain_anthropic import ChatAnthropic  # type: ignore
-        
-        # Get API key from kwargs or environment
-        api_key = kwargs.pop('api_key', None) or os.getenv('ANTHROPIC_API_KEY')
-        if not api_key:
-            raise LLMConfigurationError(
-                "Anthropic API key not found. Set ANTHROPIC_API_KEY environment variable "
-                "or pass api_key parameter."
-            )
-        
-        # Build configuration with proper parameter names
-        config = {
-            "model": model,
-            "temperature": temperature,
-            "anthropic_api_key": api_key,
-        }
-        
-        # Add optional parameters with correct naming
-        if max_tokens is not None:
-            config["max_tokens"] = max_tokens
-        if kwargs.get('base_url'):
-            config["base_url"] = kwargs.pop('base_url')
-        
-        # Add any remaining kwargs
-        config.update(kwargs)
-        
-        # ChatAnthropic is a Runnable by default
-        return ChatAnthropic(**config)
-    
-    @staticmethod
-    def _create_azure_openai_llm(
-        model: str,
-        temperature: float,
-        max_tokens: Optional[int],
-        timeout: int,
-        **kwargs: Any
-    ) -> Runnable:
-        """Create Azure OpenAI LLM instance (returns a Runnable)."""
-        LLMProvider._check_package("langchain_openai", "Azure OpenAI")
-        
-        from langchain_openai import AzureChatOpenAI
-        
-        # Get configuration from kwargs or environment
-        api_key = kwargs.pop('api_key', None) or os.getenv('AZURE_OPENAI_API_KEY')
-        endpoint = kwargs.pop('azure_endpoint', None) or os.getenv('AZURE_OPENAI_ENDPOINT')
-        
-        if not api_key:
-            raise LLMConfigurationError(
-                "Azure OpenAI API key not found. Set AZURE_OPENAI_API_KEY environment variable "
-                "or pass api_key parameter."
-            )
-        
-        if not endpoint:
-            raise LLMConfigurationError(
-                "Azure OpenAI endpoint not found. Set AZURE_OPENAI_ENDPOINT environment variable "
-                "or pass azure_endpoint parameter."
-            )
-        
-        # Build configuration with proper parameter names
-        config = {
-            "azure_deployment": model,  # In Azure, this is the deployment name
-            "temperature": temperature,
-            "openai_api_key": api_key,
-            "azure_endpoint": endpoint,
-            "openai_api_version": kwargs.pop('api_version', "2024-02-15-preview"),
-        }
-        
-        # Add optional parameters with correct naming
-        if max_tokens is not None:
-            config["max_tokens"] = max_tokens
-        
-        # Add any remaining kwargs
-        config.update(kwargs)
-        
-        # AzureChatOpenAI is a Runnable by default
-        return AzureChatOpenAI(**config)
     
     @staticmethod
     def get_supported_providers() -> Dict[str, Dict[str, str]]:
