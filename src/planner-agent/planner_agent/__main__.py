@@ -37,7 +37,7 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryPushNotifier, InMemoryTaskStore
 from a2a.types import AgentCard
-from planner_agent.core.agents.multi_agent_planner import MultiAgentPlanner
+from planner_agent.core.agent_manager import MultiAgentPlanner
 from planner_agent.core.agent_executor import GenericAgentExecutor
 
 

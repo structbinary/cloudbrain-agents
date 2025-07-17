@@ -25,26 +25,20 @@ Each node has specific tool bindings appropriate to its function.
 Inherits from MultiAgentCoordinator for robust agent lifecycle management.
 """
 
-from typing import Any, AsyncIterable, Dict, List, Literal, Optional, TypedDict, Annotated
+from typing import Any, AsyncIterable, Optional
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command, interrupt
-from langgraph.prebuilt import create_react_agent
-from langchain.prompts import ChatPromptTemplate
-import json
 from planner_agent.config import Config
 from planner_agent.utils.exceptions import ConfigError
 from planner_agent.core.base_agent import MultiAgentCoordinator, AgentConfig, AgentResponse, AgentCapability
 from planner_agent.core.llm.llm_provider import LLMProvider
-from planner_agent.models.agent_state import MultiAgentState, TaskDecomposition
-from planner_agent.prompts.prompts import PLANNER_TASK_DECOMPOSITION_PROMPT
+from planner_agent.models.agent_state import MultiAgentState
 from planner_agent.utils.logger import log_sync, log_async, AgentLogger
-from planner_agent.core.agents.a2a_agent_mapper import A2AAgentCardMapper
-from planner_agent.core.agents.mcp_server_mapper import MCPNodeMapper
+from planner_agent.core.nodes import A2AAgentCardMapper, MCPNodeMapper, TaskDecompositionNode
 import uuid
 
 # Memory saver for conversation state
@@ -77,8 +71,7 @@ class MultiAgentPlanner(MultiAgentCoordinator):
         stream_output: Optional[Any] = None,
         **kwargs: Any
     ) -> None:
-        # Always set self.model early to avoid attribute errors
-        self.model = llm_model  # May be None; will be set in _initialize_agent if not provided
+        self.model = llm_model
         self.a2a_agent_mapper = a2a_agent_mapper
         self.mcp_server_mapper = mcp_server_mapper
         self._logger = logger or AgentLogger("multi_agent_planner")
@@ -86,6 +79,7 @@ class MultiAgentPlanner(MultiAgentCoordinator):
         self._enable_visual_logging = enable_visual_logging
         self._websocket = websocket
         self._stream_output = stream_output
+        # REMOVE: self.task_decomposition_node = TaskDecompositionNode(self.model, logger=self._logger)
         agent_config = AgentConfig(
             name="MULTI_AGENT_PLANNER",
             description="Multi-agent DevOps task planning with intelligent routing",
@@ -110,12 +104,12 @@ class MultiAgentPlanner(MultiAgentCoordinator):
                 self.model = LLMProvider.create_llm(**self._planner_config.get_llm_config())
             except Exception as e:
                 raise ConfigError(f"LLM initialization failed: {e}")
+        # Now instantiate the task decomposition node with a valid model
+        self.task_decomposition_node = TaskDecompositionNode(self.model, logger=self._logger)
         # Initialize agent mappers if not injected
         if self.a2a_agent_mapper is None:
-            from planner_agent.core.agents.a2a_agent_mapper import A2AAgentCardMapper
             self.a2a_agent_mapper = A2AAgentCardMapper(self.model, config=self._planner_config, logger=self._logger)
         if self.mcp_server_mapper is None:
-            from planner_agent.core.agents.mcp_server_mapper import MCPNodeMapper
             self.mcp_server_mapper = MCPNodeMapper(self.model, config=self._planner_config, logger=self._logger)
         self.graph = self._build_graph()
 
@@ -127,124 +121,16 @@ class MultiAgentPlanner(MultiAgentCoordinator):
         """Build the multi-agent state graph with node-specific tool bindings. Requires agent mappers to be set."""
         if self.a2a_agent_mapper is None or self.mcp_server_mapper is None:
             raise RuntimeError("Both a2a_agent_mapper and mcp_server_mapper must be set before building the graph.")
-        # Create the graph
         graph = StateGraph(MultiAgentState)
-        # Add nodes with specific purposes
-        graph.add_node("task_decomposition", self._task_decomposition_node)
+        # Use the new node_stream method from TaskDecompositionNode
+        graph.add_node("task_decomposition", self.task_decomposition_node.node_stream)
         graph.add_node("a2a_agent_mapper", self.a2a_agent_mapper.node_stream)
         graph.add_node("mcp_server_mapper", self.mcp_server_mapper.node_stream)
-        # Add edges with conditional routing
         graph.add_edge(START, "task_decomposition")
         graph.add_conditional_edges("task_decomposition", self.generic_branch)
         graph.add_conditional_edges("a2a_agent_mapper", self.generic_branch)
         graph.add_conditional_edges("mcp_server_mapper", self.generic_branch)
-        # Compile with memory
         return graph.compile(checkpointer=memory)
-
-
-    @log_async
-    async def _task_decomposition_node(self, state: MultiAgentState) -> MultiAgentState:
-        self._logger.log_structured(
-            level="INFO",
-            message="[task_decomposition_node] START",
-            task_id=getattr(state, 'task_id', None),
-            context_id=getattr(state, 'context_id', None),
-            extra={"agent_name": self.__class__.__name__, "state": str(state)}
-        )
-        self._logger.log_structured(
-            level="INFO",
-            message="Starting Task Decomposition Phase",
-            task_id=getattr(state, 'task_id', None),
-            context_id=getattr(state, 'context_id', None),
-            extra={"agent_name": self.__class__.__name__}
-        )
-
-        # If resuming from human input
-        if state.status == "input_required":
-            if state.resume_value is not None:
-                # Use the human's answer and continue
-                human_answer = state.resume_value
-                state.user_query = human_answer
-                state.resume_value = None  # Clear after use
-                state.status = None  # Reset status to continue
-                # Optionally, you may want to re-run the decomposition with the new input
-                # (fall through to normal logic below)
-            else:
-                # Pause for human input
-                interrupt({"question": state.question})
-                self._logger.log_structured(
-                    level="INFO",
-                    message="[task_decomposition_node] END (interrupt)",
-                    task_id=getattr(state, 'task_id', None),
-                    context_id=getattr(state, 'context_id', None),
-                    extra={"agent_name": self.__class__.__name__, "state": str(state)}
-                )
-                return state
-
-        prompt = ChatPromptTemplate.from_template(PLANNER_TASK_DECOMPOSITION_PROMPT)
-        decomposition_agent = create_react_agent(
-            self.model,
-            checkpointer=memory,
-            prompt=PLANNER_TASK_DECOMPOSITION_PROMPT,
-            tools=[],  # No tools needed for basic task decomposition
-        )
-        user_query = getattr(state, "user_query", None)
-        if user_query is None:
-            user_query = ""
-        self._logger.log_structured(
-            level="INFO",
-            message=f"user_query={user_query}",
-            task_id=getattr(state, 'task_id', None),
-            context_id=getattr(state, 'context_id', None),
-            extra={"agent_name": self.__class__.__name__}
-        )
-        response = await decomposition_agent.ainvoke({'messages': [('user', user_query)]})
-        self._logger.log_structured(
-            level="INFO",
-            message=f"LLM raw response: {response}",
-            task_id=getattr(state, 'task_id', None),
-            context_id=getattr(state, 'context_id', None),
-            extra={"agent_name": self.__class__.__name__}
-        )
-        message = response['messages'][-1]
-        if isinstance(message, AIMessage):
-            content = message.content
-            content_str = str(content) if not isinstance(content, str) else content
-            content_data = json.loads(content_str)
-            structured_response = TaskDecomposition(**content_data)
-        else:
-            content = response
-            content_str = str(content) if not isinstance(content, str) else content
-            content_data = json.loads(content_str)
-            structured_response = TaskDecomposition(**content_data)
-        self._logger.log_structured(
-            level="INFO",
-            message=f"structured_response={structured_response}",
-            task_id=getattr(state, 'task_id', None),
-            context_id=getattr(state, 'context_id', None),
-            extra={"agent_name": self.__class__.__name__}
-        )
-        # --- Set next node ---
-        if structured_response.status == "completed":
-            state.next = "a2a_agent_mapper"
-            state.refined_task_list = structured_response.task_list
-            state.status = "working"
-        elif structured_response.status == "input_required":
-            state.next = "__end__"
-            state.question = structured_response.question
-            state.status = "input_required"
-        else:
-            state.next = "__end__"
-            state.status = "failed"
-            state.question = structured_response.question
-        self._logger.log_structured(
-            level="INFO",
-            message="[task_decomposition_node] END",
-            task_id=getattr(state, 'task_id', None),
-            context_id=getattr(state, 'context_id', None),
-            extra={"agent_name": self.__class__.__name__, "state": str(state)}
-        )
-        return state
 
 
     @log_async
