@@ -15,7 +15,7 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 import traceback
-from typing import Literal, cast, List
+from typing import Literal, cast, List, Any, Optional
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
 import json
@@ -34,7 +34,7 @@ class A2AAgentCardMapper(MultiAgentCoordinator):
     """
     This node is responsible for mapping the right a2a agent card for a given task.
     """
-    def __init__(self, llm_model, enable_visual_logging=True, websocket=None, stream_output=None, **kwargs):
+    def __init__(self, llm_model: Any, enable_visual_logging: bool = True, websocket: Optional[Any] = None, stream_output: Optional[Any] = None, **kwargs: Any) -> None:
         agent_config = AgentConfig(
             name="a2a_agent_mapper",
             description="A2A Agent Mapper",
@@ -56,7 +56,7 @@ class A2AAgentCardMapper(MultiAgentCoordinator):
         super().__init__(config=agent_config, **kwargs)
 
     @log_sync
-    def _initialize_agent(self, **kwargs):
+    def _initialize_agent(self, **kwargs: Any) -> None:
         """Initialize multi-agent planner specific components."""
         if self._enable_visual_logging:
             self.setup_enhanced_logging(

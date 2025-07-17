@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 class MultiAgentState(BaseModel):
     """State schema for multi-agent planning workflow."""
     messages: Annotated[list, add_messages]
-    user_query:str
+    user_query: str
     status: Optional[str] = None
     question: Optional[str] = None
     refined_task_list: Optional[List[str]] = None

@@ -64,7 +64,7 @@ class MultiAgentPlanner(MultiAgentCoordinator):
     """
 
     @log_sync
-    def __init__(self, enable_visual_logging=True, websocket=None, stream_output=None, **kwargs):
+    def __init__(self, enable_visual_logging: bool = True, websocket: Optional[Any] = None, stream_output: Optional[Any] = None, **kwargs: Any) -> None:
         # logger.info('Initializing MultiAgentPlanner with node-specific tool bindings')
 
         # Create agent configuration
@@ -93,7 +93,7 @@ class MultiAgentPlanner(MultiAgentCoordinator):
         # logger.info('MultiAgentPlanner initialization complete')
 
     @log_sync
-    def _initialize_agent(self, **kwargs) -> None:
+    def _initialize_agent(self, **kwargs: Any) -> None:
         """Initialize multi-agent planner specific components."""
         # logger.info("Initializing MultiAgentPlanner components")
         
@@ -118,7 +118,7 @@ class MultiAgentPlanner(MultiAgentCoordinator):
         # Build multi-agent graph
         self.graph = self._build_graph()
 
-    def generic_branch(self, state: MultiAgentState, *args, **kwargs) -> str:
+    def generic_branch(self, state: MultiAgentState, *args: Any, **kwargs: Any) -> str:
         return state.next if state.next is not None else "__end__"
 
     @log_sync

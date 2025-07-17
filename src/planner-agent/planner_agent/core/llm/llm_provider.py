@@ -15,7 +15,7 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from langchain_core.runnables import Runnable
 from planner_agent.utils.exceptions import UnsupportedProviderError, LLMConfigurationError
 

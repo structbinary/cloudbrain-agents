@@ -35,7 +35,7 @@ from a2a.types import (
 from a2a.utils import new_agent_text_message, new_task
 from a2a.utils.errors import ServerError
 from planner_agent.core.base_agent import BaseAgent
-from typing import cast
+from typing import cast, Any
 
 
 logger = logging.getLogger(__name__)
@@ -44,8 +44,8 @@ logger = logging.getLogger(__name__)
 class GenericAgentExecutor(AgentExecutor):
     """AgentExecutor used by the tragel agents with JSON-RPC 2.0 validation support."""
 
-    def __init__(self, agent: BaseAgent):
-        self.agent = agent
+    def __init__(self, agent: BaseAgent) -> None:
+        self.agent: BaseAgent = agent
 
     async def execute(
         self,
@@ -80,8 +80,8 @@ class GenericAgentExecutor(AgentExecutor):
             # Ensure self.agent.stream is an async generator, or await if it's a coroutine returning one
             agent_stream = self.agent.stream(query, task.contextId, task.id)
             if not inspect.isasyncgen(agent_stream):
-                agent_stream = await agent_stream
-            async for item in agent_stream:
+                agent_stream = await agent_stream  # type: ignore
+            async for item in agent_stream:  # type: ignore
                 # logger.debug(f'Received item from agent stream: {item}')
                 # Forward agent-to-agent events directly to the event queue
                 root = getattr(item, 'root', None)
@@ -107,15 +107,21 @@ class GenericAgentExecutor(AgentExecutor):
                 if is_task_complete:
                     logger.info('Task is marked as complete by agent')
                     if item.response_type == 'data':
-                        part = cast(Part, DataPart(data=item.content))
+                        data_part: Part = cast(Part, DataPart(data=item.content))
                     else:
-                        part = cast(Part, TextPart(text=item.content))
+                        text_part: Part = cast(Part, TextPart(text=item.content))
 
                     logger.info('Adding artifact to updater')
-                    await updater.add_artifact(
-                        [part],
-                        name=f'{self.agent.name}-result',
-                    )
+                    if item.response_type == 'data':
+                        await updater.add_artifact(
+                            [data_part],
+                            name=f'{self.agent.name}-result',
+                        )
+                    else:
+                        await updater.add_artifact(
+                            [text_part],
+                            name=f'{self.agent.name}-result',
+                        )
                     logger.info('Sending final status update: TaskState.completed')
                     await updater.update_status(
                         TaskState.completed,
@@ -163,7 +169,7 @@ class GenericAgentExecutor(AgentExecutor):
 
     def _map_status_to_task_state(self, custom_status: str) -> TaskState:
         """Map custom status strings to A2A TaskState enum values."""
-        status_mapping = {
+        status_mapping: dict[str, TaskState] = {
             'working': TaskState.working,
             'input_required': TaskState.input_required,
             'completed': TaskState.completed,

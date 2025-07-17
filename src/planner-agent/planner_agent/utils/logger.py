@@ -18,7 +18,7 @@ from colorama import Fore, Style
 from enum import Enum
 import logging
 from datetime import datetime
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 from functools import wraps
 import functools
 import inspect
@@ -52,13 +52,13 @@ class LogLevel(Enum):
 class AgentLogger:
     """Logger class for agent output with color encoding and multiple output methods."""
     
-    def __init__(self, agent_name: str = "BASE"):
+    def __init__(self, agent_name: str = "BASE") -> None:
         self.agent_name = agent_name
         self.logger = logging.getLogger(f"{__name__}.{agent_name}")
         self.websocket = None
         self.stream_output = None
         
-    def set_websocket(self, websocket: Any, stream_output: Callable):
+    def set_websocket(self, websocket: Any, stream_output: Callable) -> None:
         """Set websocket and stream output function."""
         self.websocket = websocket
         self.stream_output = stream_output
@@ -79,22 +79,22 @@ class AgentLogger:
             "level": level
         }
         
-    def _log_to_console(self, message: str, level: str = "INFO"):
+    def _log_to_console(self, message: str, level: str = "INFO") -> None:
         """Log to console with color."""
         color = self._get_color(self.agent_name)
         print(f"{color}{self.agent_name}: {message}{Style.RESET_ALL}")
         
-    def _log_to_file(self, message: str, level: str = "INFO"):
+    def _log_to_file(self, message: str, level: str = "INFO") -> None:
         """Log to file."""
         log_method = getattr(self.logger, level.lower())
         log_method(f"[{self.agent_name}] {message}")
         
-    async def _log_to_websocket(self, message: str):
+    async def _log_to_websocket(self, message: str) -> None:
         """Log to websocket."""
         if self.websocket and self.stream_output:
             await self.stream_output("logs", self.agent_name, message, self.websocket)
             
-    async def log(self, message: str, level: str = "INFO"):
+    async def log(self, message: str, level: str = "INFO") -> None:
         """Log message to all configured outputs."""
         # Log to console
         self._log_to_console(message, level)
@@ -115,7 +115,7 @@ class AgentLogger:
         """Create a new logger instance."""
         return cls(agent_name)
 
-def get_log_context(args, kwargs, func=None):
+def get_log_context(args: Any, kwargs: Any, func: Optional[Callable] = None) -> tuple[Optional[str], Optional[Any], Optional[Any]]:
     agent_name = None
     task_id = None
     context_id = None
@@ -167,7 +167,7 @@ def get_log_context(args, kwargs, func=None):
 
     return agent_name, task_id, context_id
 
-def log_json(log_type, message, agent_name=None, task_id=None, context_id=None):
+def log_json(log_type: str, message: str, agent_name: Optional[str] = None, task_id: Optional[Any] = None, context_id: Optional[Any] = None) -> None:
     log_entry = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "agent_name": agent_name,
@@ -178,7 +178,7 @@ def log_json(log_type, message, agent_name=None, task_id=None, context_id=None):
     }
     print(json.dumps(log_entry))
 
-def log_sync(func):
+def log_sync(func: Callable) -> Callable:
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         agent_name, task_id, context_id = get_log_context(args, kwargs, func)
@@ -192,7 +192,7 @@ def log_sync(func):
             raise
     return wrapper
 
-def log_async(func):
+def log_async(func: Callable) -> Callable:
     @functools.wraps(func)
     async def async_wrapper(*args, **kwargs):
         agent_name, task_id, context_id = get_log_context(args, kwargs, func)

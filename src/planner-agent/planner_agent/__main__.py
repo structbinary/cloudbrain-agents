@@ -44,24 +44,24 @@ from planner_agent.core.agent_executor import GenericAgentExecutor
 @click.option('--host', 'host', default='localhost')
 @click.option('--port', 'port', default=10101)
 @click.option('--agent-card', 'agent_card')
-def main(host, port, agent_card):
+def main(host: str, port: int, agent_card: str) -> None:
     """
     Main entry point for the Planner Agent server.
     """
     try:
         if not agent_card:
             raise ValueError('Agent card is required')
-        with Path.open(agent_card) as file:
+        with Path(agent_card).open() as file:
             data = json.load(file)
-        agent_card = AgentCard(**data)
-        client = httpx.AsyncClient()
-        request_handler = DefaultRequestHandler(
+        agent_card_obj: AgentCard = AgentCard(**data)
+        client: httpx.AsyncClient = httpx.AsyncClient()
+        request_handler: DefaultRequestHandler = DefaultRequestHandler(
             agent_executor=GenericAgentExecutor(agent=MultiAgentPlanner()),
             task_store=InMemoryTaskStore(),
             push_notifier=InMemoryPushNotifier(client),
         )
-        server = A2AStarletteApplication(
-            agent_card=agent_card, http_handler=request_handler
+        server: A2AStarletteApplication = A2AStarletteApplication(
+            agent_card=agent_card_obj, http_handler=request_handler
         )
         logger.info(f'Starting Planner Agent server on {host}:{port}')
         uvicorn.run(server.build(), host=host, port=port)

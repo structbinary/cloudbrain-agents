@@ -26,7 +26,7 @@ load_dotenv()
 class Config:
     """Configuration class for Planner Agent."""
 
-    def __init__(self, config: Dict[str, Any] = {}):
+    def __init__(self, config: Dict[str, Any] = {}) -> None:
         """Initialize the configuration.
         Args:
             config: Optional configuration dictionary to override defaults

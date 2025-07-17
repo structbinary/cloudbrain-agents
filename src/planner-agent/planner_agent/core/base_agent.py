@@ -22,7 +22,7 @@ following Python architectural best practices and design patterns.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, AsyncIterable, TypeVar, Generic, Union, Protocol
+from typing import Any, Dict, List, Optional, AsyncIterable, TypeVar, Generic, Union, Protocol, Callable, AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
 from loguru import logger
@@ -76,7 +76,7 @@ class AgentConfig:
     """Standardized agent configuration."""
     name: str
     description: str = ""
-    capabilities: List[AgentCapability] = field(default_factory=list)
+    capabilities: List['AgentCapability'] = field(default_factory=list)
     content_types: List[str] = field(default_factory=lambda: ['text/plain'])
     max_retries: int = 3
     timeout_seconds: int = 30
@@ -85,7 +85,7 @@ class AgentConfig:
     log_level: str = "INFO"
     custom_config: Dict[str, Any] = field(default_factory=dict)
     
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         if not self.name.strip():
             raise ValueError("Agent name cannot be empty")
@@ -134,7 +134,7 @@ class BaseAgent(ABC, Generic[ConfigType]):
     - Observer: Optional event notification system
     """
     
-    def __init__(self, config: Union[AgentConfig, Dict[str, Any]], **kwargs):
+    def __init__(self, config: Union[AgentConfig, Dict[str, Any]], **kwargs: Any) -> None:
         """
         Initialize the base agent.
         
@@ -182,12 +182,12 @@ class BaseAgent(ABC, Generic[ConfigType]):
         return self._config.description
     
     @property
-    def capabilities(self) -> List[AgentCapability]:
+    def capabilities(self) -> List['AgentCapability']:
         """Agent capabilities."""
         return self._config.capabilities
     
     @property
-    def status(self) -> AgentStatus:
+    def status(self) -> 'AgentStatus':
         """Current agent status."""
         return self._status
     
@@ -206,7 +206,7 @@ class BaseAgent(ABC, Generic[ConfigType]):
     # =========================================================================
     # @log_sync
     @abstractmethod
-    def _initialize_agent(self, **kwargs) -> None:
+    def _initialize_agent(self, **kwargs: Any) -> None:
         """
         Initialize agent-specific components.
         
@@ -332,7 +332,7 @@ class BaseAgent(ABC, Generic[ConfigType]):
     # UTILITY METHODS - Common functionality
     # =========================================================================
     
-    def has_capability(self, capability: AgentCapability) -> bool:
+    def has_capability(self, capability: 'AgentCapability') -> bool:
         """Check if agent has specific capability."""
         return capability in self.capabilities
     
@@ -352,7 +352,7 @@ class BaseAgent(ABC, Generic[ConfigType]):
         self._session_data.pop(session_id, None)
     
     @asynccontextmanager
-    async def error_handling(self, operation: str = "operation"):
+    async def error_handling(self, operation: str = "operation") -> AsyncIterator[None]:
         """
         Context manager for consistent error handling.
         
@@ -369,11 +369,11 @@ class BaseAgent(ABC, Generic[ConfigType]):
                 self._metrics.failed_requests += 1
             raise
     
-    def _log_handler(self, message) -> None:
+    def _log_handler(self, message: Any) -> None:
         """Handle log messages (can be overridden for custom logging)."""
         print(message)  # Default implementation
     
-    def setup_enhanced_logging(self, websocket=None, stream_output=None) -> None:
+    def setup_enhanced_logging(self, websocket: Optional[Any] = None, stream_output: Optional[Callable] = None) -> None:
         """
         Set up enhanced logging with custom AgentLogger integration.
         
@@ -476,7 +476,7 @@ class LLMAgent(BaseAgent[AgentConfig]):
     Provides common functionality for agents that use language models.
     """
     
-    def _initialize_agent(self, **kwargs) -> None:
+    def _initialize_agent(self, **kwargs: Any) -> None:
         """Initialize LLM-specific components."""
         self._model = None  # To be set by subclasses
         self._capabilities = [
@@ -495,7 +495,7 @@ class MultiAgentCoordinator(BaseAgent[AgentConfig]):
     Provides common functionality for supervisor/coordinator patterns.
     """
     
-    def _initialize_agent(self, **kwargs) -> None:
+    def _initialize_agent(self, **kwargs: Any) -> None:
         """Initialize multi-agent coordination components."""
         self._sub_agents: Dict[str, BaseAgent] = {}
         self._capabilities = [
@@ -506,12 +506,12 @@ class MultiAgentCoordinator(BaseAgent[AgentConfig]):
         # Update config capabilities
         self._config.capabilities.extend(self._capabilities)
     
-    def register_agent(self, name: str, agent: BaseAgent) -> None:
+    def register_agent(self, name: str, agent: 'BaseAgent') -> None:
         """Register a sub-agent."""
         self._sub_agents[name] = agent
         logger.info(f"Registered sub-agent '{name}' in coordinator '{self.name}'")
     
-    def get_agent(self, name: str) -> Optional[BaseAgent]:
+    def get_agent(self, name: str) -> Optional['BaseAgent']:
         """Get a registered sub-agent."""
         return self._sub_agents.get(name)
     
