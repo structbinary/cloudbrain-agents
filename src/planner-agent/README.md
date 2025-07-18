@@ -4,6 +4,7 @@
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](https://opensource.org/licenses/GPL-2.0)
 [![A2A Protocol](https://img.shields.io/badge/Protocol-A2A-green.svg)](https://github.com/google/a2a)
 [![MCP Integration](https://img.shields.io/badge/Integration-MCP-orange.svg)](https://modelcontextprotocol.io/)
+[![Agentic Framework](https://img.shields.io/badge/Agentic%20Framework-LangChain%20%7C%20LangGraph-blueviolet)](https://python.langchain.com/docs/langgraph/)
 
 > **AI-Powered DevOps Orchestrator** - Intelligent task decomposition and multi-agent coordination for complex DevOps automation
 
