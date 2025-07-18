@@ -26,10 +26,10 @@ This enables teams to automate complex, multi-step DevOps workflows with minimal
 
 To enable the Planner Agent to map user requests to the appropriate executor agents—and to determine which MCP server should supplement each executor agent for specific tasks—a central registry service is required. This registry holds details about available executor agents and which MCP servers are available for which tasks.
 
-You can find setup and usage details in the agents-mcp-server README: <placeholder>
+You can find setup and usage details in the [agents-mcp-server README](https://github.com/structbinary/cloudbrain-mcp/blob/main/src/argocd-mcp-server/README.md)
 
 **Setup Steps:**
-1. **Spin up the central registry server (agents-mcp-server)** before running the Planner Agent.
+1. **Spin up the central registry server by following the above link (agents-mcp-server)** before running the Planner Agent.
 2. **Configure the MCP server connection details** in your `.env` file (see example variables below):
    - `AGENTS_MCP_SERVER_HOST`
    - `AGENTS_MCP_SERVER_PORT`
