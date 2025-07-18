@@ -21,7 +21,7 @@ from langchain.prompts import ChatPromptTemplate
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import interrupt
 from planner_agent.models.agent_state import MultiAgentState, TaskDecomposition
-from planner_agent.prompts.prompts import PLANNER_TASK_DECOMPOSITION_PROMPT
+from planner_agent.prompts import PLANNER_TASK_DECOMPOSITION_PROMPT
 from planner_agent.utils.logger import log_async, AgentLogger
 from planner_agent.core.base_agent import MultiAgentCoordinator, AgentConfig, AgentCapability
 from langgraph.checkpoint.memory import MemorySaver
