@@ -34,5 +34,3 @@ __pycache__/
 *.pyc
 *$py.class
 **/dist
-planner_agent/card
-docs/
