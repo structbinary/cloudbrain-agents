@@ -163,22 +163,28 @@ This separation of concerns leads to a more interactive, scalable, and maintaina
       │  (1. High-level request)
       ▼
 ┌──────────────┐
+│ Supervisor   │
+│  Agent       │
+└─────┬────────┘
+      │  (2. Forward request & coordinate execution)
+      ▼
+┌──────────────┐
 │ Planner      │
 │  Agent       │
 └─────┬────────┘
-      │  (2. Decompose, map tasks, fetch agent & MCP info, clarify if needed)
+      │  (3. Decompose, map tasks, fetch agent & MCP info)
       ▼
 ┌──────────────┐
 │ Supervisor   │
 │  Agent       │
 └─────┬────────┘
-      │  (3. Orchestrate execution)
+      │  (4. Forward execution details & orchestrate)
       ▼
 ┌──────────────┐
 │ Executor     │────────────┐
 │  Agents      │            │
 └─────┬────────┘            │
-      │ (4. Use MCP server) │
+      │ (5. Execute tasks via MCP servers) │
       ▼                     │
 ┌──────────────┐            │
 │ MCP Servers  │◀───────────┘
@@ -191,8 +197,16 @@ This separation of concerns leads to a more interactive, scalable, and maintaina
 │ - MCP server inventory       │
 └──────────────────────────────┘
 
+[Flow Details]
+1. User → Supervisor Agent: Initial high-level request
+2. Supervisor Agent → Planner Agent: Forward request for decomposition
+3. Planner Agent → Supervisor Agent: Return detailed execution plan
+4. Supervisor Agent → Executor Agents: Forward specific tasks with MCP server details
+5. Executor Agents → MCP Servers: Execute tasks using appropriate tools
+
 [Human-in-the-Loop]
-- Planner Agent may interact with User for clarification/feedback at any step before plan is finalized.
+- Supervisor Agent may interact with User for clarification/feedback at any step
+- Planner Agent provides detailed breakdown and agent/MCP server mapping
 ```
 
 ## 📋 Prerequisites
