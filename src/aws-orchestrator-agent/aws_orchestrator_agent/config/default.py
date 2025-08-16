@@ -1,0 +1,134 @@
+# Copyright (C) 2025 StructBinary
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+class DefaultConfig:
+    """Default configuration for the AWS Orchestrator Agent."""
+    # LLM Configuration
+    LLM_PROVIDER: str = "openai"
+    LLM_MODEL: str = "gpt-4o"
+    LLM_TEMPERATURE: float = 0.0
+    LLM_MAX_TOKENS: int = 1000
+    
+    # Logging Configuration
+    LOG_LEVEL: str = "INFO"
+    LOG_FILE: str = "aws_orchestrator_agent.log"
+    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    LOG_DATE_FORMAT: str = "%Y-%m-%d %H:%M:%S"
+    LOG_TO_CONSOLE: bool = True
+    LOG_TO_FILE: bool = True
+    LOG_STRUCTURED_JSON: bool = False
+    
+    # MCP Server Configuration
+    TERRAFORM_MCP_SERVER_HOST: str = "localhost"
+    TERRAFORM_MCP_SERVER_PORT: int = 8000
+    TERRAFORM_MCP_SERVER_TRANSPORT: str = "sse"
+    TERRAFORM_MCP_SERVER_DISABLED: bool = False
+    AGENTS_MCP_SERVER_AUTO_APPROVE: list = []
+    
+    # Supervisor Agent Configuration
+    SUPERVISOR_OUTPUT_MODE: str = "full_history"
+    SUPERVISOR_ADD_HANDOFF_BACK_MESSAGES: bool = True
+    SUPERVISOR_MAX_SNAPSHOTS: int = 10
+    SUPERVISOR_ENABLE_AUDIT_TRAIL: bool = True
+    SUPERVISOR_MAX_CONCURRENT_WORKFLOWS: int = 10
+    SUPERVISOR_WORKFLOW_TIMEOUT: int = 300
+    SUPERVISOR_MAX_RETRIES: int = 3
+    SUPERVISOR_TIMEOUT_SECONDS: int = 300
+    SUPERVISOR_HUMAN_APPROVAL_REQUIRED: list = [
+        "terraform_apply",
+        "security_violations", 
+        "cost_threshold_exceeded",
+        "breaking_changes",
+        "production_deployment"
+    ]
+    SUPERVISOR_VALIDATION_ALWAYS_REQUIRED: list = [
+        "terraform_generation",
+        "terraform_modification",
+        "infrastructure_changes"
+    ]
+    
+    # Agent Names and Descriptions
+    SUPERVISOR_AGENT_NAMES: dict = {
+        "analysis": "Analysis Agent",
+        "generation": "Generation Agent",
+        "validation": "Validation Agent", 
+        "editor": "Editor Agent"
+    }
+    
+    SUPERVISOR_AGENT_DESCRIPTIONS: dict = {
+        "analysis": "Handles requirements analysis, conversation management, and AWS context retrieval",
+        "generation": "Creates new Terraform modules from scratch with best practices and patterns",
+        "validation": "Performs comprehensive validation including syntax, plan, security, and compliance checks",
+        "editor": "Modifies existing Terraform configurations with surgical precision and minimal disruption"
+    }
+    
+    # Routing Rules Configuration
+    SUPERVISOR_ROUTING_RULES: dict = {
+        "analysis": [
+            "requirements_gathering",
+            "conversation_management", 
+            "context_retrieval",
+            "user_clarification",
+            "workflow_planning"
+        ],
+        "generation": [
+            "new_terraform_modules",
+            "infrastructure_generation",
+            "best_practices_implementation",
+            "pattern_application"
+        ],
+        "validation": [
+            "terraform_validation",
+            "security_scanning",
+            "compliance_checks",
+            "plan_validation",
+            "cost_analysis"
+        ],
+        "editor": [
+            "terraform_modification",
+            "surgical_updates",
+            "version_compatibility",
+            "state_management"
+        ]
+    }
+    
+    # Error Handling Configuration
+    SUPERVISOR_ERROR_HANDLING_CONFIG: dict = {
+        "max_retries_per_agent": 2,
+        "retry_delay_seconds": 5,
+        "escalation_threshold": 3,
+        "fallback_agents": {
+            "generation": "editor",
+            "validation": "analysis",
+            "editor": "generation"
+        }
+    }
+    
+    # State Schema Configuration
+    SUPERVISOR_STATE_SCHEMA_CONFIG: dict = {
+        "shared_keys": ["messages", "current_workflow", "user_approval_required"],
+        "supervisor_keys": ["supervisor_context", "routing_history", "error_context"],
+        "subgraph_keys": {
+            "analysis": ["analysis_context", "requirements", "aws_context"],
+            "generation": ["generation_context", "terraform_code", "mcp_registry_data"],
+            "validation": ["validation_context", "validation_results", "validation_stages"],
+            "editor": ["editor_context", "modifications", "state_analysis"]
+        }
+    }
+    
+    # A2A Server Configuration
+    A2A_SERVER_HOST: str = "localhost"
+    A2A_SERVER_PORT: int = 10102

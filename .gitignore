@@ -558,7 +558,6 @@ samples/mcp-integration-with-nova-canvas/output/*
 memory-bank/*
 .clinerules
 src/ci-cd-agent
-src/aws-orchestrator-agent
 src/agents-mcp-server
 src/k8s-deployer-agent
 src/orchestrator-agent
