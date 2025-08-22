@@ -139,13 +139,14 @@ class RiskLevel(str, Enum):
 
 
 # ============================================================================
-# SUPERVISOR STATE SCHEMA
+# SUPERVISOR STATE SCHEMA (CENTRAL ORCHESTRATOR)
 # ============================================================================
 
 class SupervisorState(BaseModel):
     """
     Supervisor state following LangGraph best practices.
     
+    Central orchestrator that manages workflow, message history, and agent coordination.
     Uses Annotated[list, add_messages] for proper message handling and
     extends with infrastructure orchestration fields.
     """
@@ -162,6 +163,7 @@ class SupervisorState(BaseModel):
     
     # User context (essential for our use case)
     user_request: str
+    question: Optional[str] = None
     
     # Infrastructure artifacts (essential for Terraform orchestration)
     workspace_ref: Optional[str] = None  # URI to workspace
@@ -185,80 +187,13 @@ class SupervisorState(BaseModel):
     workflow_started_at: Optional[datetime] = None
     workflow_completed_at: Optional[datetime] = None
     
-    class Config:
-        """Pydantic configuration."""
-        use_enum_values = True
-        validate_assignment = True
-
-
-# ============================================================================
-# PLANNER AGENT STATE SCHEMA
-# ============================================================================
-
-class PlannerState(BaseModel):
-    """
-    State schema for the Planner Agent subgraph.
-    
-    Responsible for requirements analysis, dependency mapping, and execution planning.
-    Extends MessagesState pattern for proper message handling.
-    """
-    
-    # Core LangGraph-style state with proper message handling
-    messages: Annotated[List[AnyMessage], add_messages] = Field(default_factory=list)
-    
-    # Input from supervisor
-    session_id: Optional[str] = None
-    task_id: Optional[str] = None
-    user_request: str
-    mcp_context: Dict[str, Any] = Field(default_factory=dict)
-    
-    # Planning process
-    requirements_analysis: Dict[str, Any] = Field(default_factory=dict)
-    infrastructure_requirements: List[Dict[str, Any]] = Field(default_factory=list)
-    architectural_patterns: List[str] = Field(default_factory=list)
-    security_requirements: List[str] = Field(default_factory=list)
-    compliance_requirements: List[str] = Field(default_factory=list)
-    
-    # Dependency mapping
-    dependency_mapping_complete: bool = False
-    dependency_questions: List[str] = Field(default_factory=list)
-    dependency_answers: Dict[str, Any] = Field(default_factory=dict)
-    waiting_for_dependency_input: bool = False
-    current_dependency_question: Optional[str] = None
-    
-    # Execution plan
-    execution_plan: List[Dict[str, Any]] = Field(default_factory=list)
-    complexity_score: int = 0
-    risk_assessment: Dict[str, Any] = Field(default_factory=dict)
-    
-    # Internal working state
-    planning_metadata: Dict[str, Any] = Field(default_factory=dict)
-    planning_started_at: Optional[datetime] = None
-    planning_completed_at: Optional[datetime] = None
-    planning_duration: Optional[float] = None
-    
-    # Status and workflow tracking
-    status: str = "initialized"
-    current_step: Optional[str] = None
-    completed_steps: List[str] = Field(default_factory=list)
-    request_type: Optional[str] = None
-    error: Optional[str] = None
-    
-    # Additional fields for planning process
-    resource_requirements: Dict[str, Any] = Field(default_factory=dict)
-    cost_analysis: Dict[str, Any] = Field(default_factory=dict)
-    validation_criteria: List[str] = Field(default_factory=list)
-    
-    # Approval and interrupt handling
-    requires_approval: bool = False
-    approval_context: Optional[Dict[str, Any]] = Field(default_factory=dict)
-    interrupt_required: bool = False
-    interrupt_context: Optional[Dict[str, Any]] = Field(default_factory=dict)
-    
-    # Output to supervisor
-    planning_complete: bool = False
-    next_agent: Optional[AgentType] = None
-    handoff_context: Dict[str, Any] = Field(default_factory=dict)
+    # Agent-specific state data (for coordination)
+    planner_data: Optional[Dict[str, Any]] = None
+    generation_data: Optional[Dict[str, Any]] = None
+    validation_data: Optional[Dict[str, Any]] = None
+    editor_data: Optional[Dict[str, Any]] = None
+    security_data: Optional[Dict[str, Any]] = None
+    cost_data: Optional[Dict[str, Any]] = None
     
     class Config:
         """Pydantic configuration."""
@@ -267,14 +202,19 @@ class PlannerState(BaseModel):
 
 
 # ============================================================================
-# GENERATION AGENT STATE SCHEMA
+# SIMPLIFIED AGENT STATE SCHEMAS
 # ============================================================================
+
+# Note: PlannerState has been removed. The planner sub-supervisor now manages
+# its own state internally using PlannerSupervisorState. The supervisor only
+# receives final results via the planner's output_transform() method.
 
 class GenerationState(BaseModel):
     """
-    State schema for the Generation Agent subgraph.
+    Simplified state schema for the Generation Agent subgraph.
     
-    Responsible for creating new Terraform modules from scratch with best practices.
+    Contains only agent-specific input, processing, and output data.
+    All workflow management handled by SupervisorState.
     """
     
     # Input from supervisor/planner
@@ -282,6 +222,9 @@ class GenerationState(BaseModel):
     provider_versions: Dict[str, str] = Field(default_factory=dict)
     registry_schemas_ref: Optional[str] = None  # URI to registry schemas
     standards_profile: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Question handling
+    question: Optional[str] = None  # Question for user input if needed
     
     # Generation process
     design_rationale: Optional[str] = None
@@ -298,26 +241,18 @@ class GenerationState(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     best_practices_applied: List[str] = Field(default_factory=list)
     
-    # Output to supervisor
-    generation_complete: bool = False
-    generated_module_ref: Optional[str] = None  # URI to final module
-    module_summary: Dict[str, Any] = Field(default_factory=dict)
-    
     class Config:
         """Pydantic configuration."""
         use_enum_values = True
         validate_assignment = True
 
 
-# ============================================================================
-# VALIDATION AGENT STATE SCHEMA
-# ============================================================================
-
 class ValidationState(BaseModel):
     """
-    State schema for the Validation Agent subgraph.
+    Simplified state schema for the Validation Agent subgraph.
     
-    Responsible for comprehensive validation including syntax, plan, security, and compliance.
+    Contains only agent-specific input, processing, and output data.
+    All workflow management handled by SupervisorState.
     """
     
     # Input from supervisor
@@ -325,6 +260,9 @@ class ValidationState(BaseModel):
     workspace_ref: Optional[str] = None  # URI to workspace
     policy_sets: List[str] = Field(default_factory=list)
     quota_profile: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Question handling
+    question: Optional[str] = None  # Question for user input if needed
     
     # Validation stages (parallel execution)
     static_analysis: Dict[str, Any] = Field(default_factory=dict)
@@ -336,17 +274,8 @@ class ValidationState(BaseModel):
     
     # Validation results
     validation_report_ref: Optional[str] = None  # URI to full report
-    status: ValidationStatus = ValidationStatus.PENDING
     blockers: List[Dict[str, Any]] = Field(default_factory=list)
     warnings: List[Dict[str, Any]] = Field(default_factory=list)
-    
-    # Parallel execution tracking
-    completed_stages: List[str] = Field(default_factory=list)
-    failed_stages: List[str] = Field(default_factory=list)
-    
-    # Output to supervisor
-    validation_complete: bool = False
-    validation_summary: Dict[str, Any] = Field(default_factory=dict)
     
     class Config:
         """Pydantic configuration."""
@@ -354,15 +283,12 @@ class ValidationState(BaseModel):
         validate_assignment = True
 
 
-# ============================================================================
-# EDITOR AGENT STATE SCHEMA
-# ============================================================================
-
 class EditorState(BaseModel):
     """
-    State schema for the Editor Agent subgraph.
+    Simplified state schema for the Editor Agent subgraph.
     
-    Responsible for modifying existing Terraform configurations with surgical precision.
+    Contains only agent-specific input, processing, and output data.
+    All workflow management handled by SupervisorState.
     """
     
     # Input from supervisor
@@ -370,6 +296,9 @@ class EditorState(BaseModel):
     change_request: Dict[str, Any] = Field(default_factory=dict)
     state_diff_context: Dict[str, Any] = Field(default_factory=dict)
     dependency_graph: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Question handling
+    question: Optional[str] = None  # Question for user input if needed
     
     # Editing process
     ast_notes: Dict[str, Any] = Field(default_factory=dict)
@@ -386,32 +315,27 @@ class EditorState(BaseModel):
     apply_risk: RiskLevel = RiskLevel.LOW
     rollback_strategy: Optional[str] = None
     
-    # Output to supervisor
-    editor_complete: bool = False
-    modified_config_ref: Optional[str] = None  # URI to modified config
-    change_summary: Dict[str, Any] = Field(default_factory=dict)
-    
     class Config:
         """Pydantic configuration."""
         use_enum_values = True
         validate_assignment = True
 
 
-# ============================================================================
-# SECURITY AGENT STATE SCHEMA
-# ============================================================================
-
 class SecurityState(BaseModel):
     """
-    State schema for the Security Agent subgraph.
+    Simplified state schema for the Security Agent subgraph.
     
-    Responsible for security analysis, IAM analysis, and compliance checking.
+    Contains only agent-specific input, processing, and output data.
+    All workflow management handled by SupervisorState.
     """
     
     # Input from supervisor
     module_ref: Optional[str] = None  # URI to module to analyze
     security_policies: List[str] = Field(default_factory=list)
     compliance_frameworks: List[str] = Field(default_factory=list)
+    
+    # Question handling
+    question: Optional[str] = None  # Question for user input if needed
     
     # Security analysis
     iam_analysis: Dict[str, Any] = Field(default_factory=dict)
@@ -428,10 +352,8 @@ class SecurityState(BaseModel):
     severity_counts: Dict[str, int] = Field(default_factory=dict)
     required_actions: List[str] = Field(default_factory=list)
     
-    # Output to supervisor
-    security_complete: bool = False
+    # Output reference
     security_report_ref: Optional[str] = None  # URI to security report
-    security_summary: Dict[str, Any] = Field(default_factory=dict)
     
     class Config:
         """Pydantic configuration."""
@@ -439,20 +361,20 @@ class SecurityState(BaseModel):
         validate_assignment = True
 
 
-# ============================================================================
-# COST AGENT STATE SCHEMA
-# ============================================================================
-
 class CostState(BaseModel):
     """
-    State schema for the Cost Agent subgraph.
+    Simplified state schema for the Cost Agent subgraph.
     
-    Responsible for cost estimation, forecasting, and optimization.
+    Contains only agent-specific input, processing, and output data.
+    All workflow management handled by SupervisorState.
     """
     
     # Input from supervisor
     plan_json_ref: Optional[str] = None  # URI to Terraform plan JSON
     region: str = "us-east-1"
+    
+    # Question handling
+    question: Optional[str] = None  # Question for user input if needed
     pricing_cache_hint: Optional[str] = None
     
     # Cost analysis
@@ -470,10 +392,8 @@ class CostState(BaseModel):
     cost_history: List[Dict[str, Any]] = Field(default_factory=list)
     trend_analysis: Dict[str, Any] = Field(default_factory=dict)
     
-    # Output to supervisor
-    cost_complete: bool = False
+    # Output reference
     cost_report_ref: Optional[str] = None  # URI to cost report
-    cost_summary: Dict[str, Any] = Field(default_factory=dict)
     
     class Config:
         """Pydantic configuration."""
@@ -482,11 +402,169 @@ class CostState(BaseModel):
 
 
 # ============================================================================
+# STATE TRANSFORMATION FUNCTIONS
+# ============================================================================
+
+class StateTransformer:
+    """Handles state transformations between supervisor and agents."""
+    
+    @staticmethod
+    def supervisor_to_generation(supervisor_state: SupervisorState) -> GenerationState:
+        """Transform supervisor state to generation state."""
+        planner_data = supervisor_state.planner_data or {}
+        return GenerationState(
+            requirements=planner_data.get("requirements_analysis", {}),
+            provider_versions=planner_data.get("provider_versions", {}),
+            registry_schemas_ref=supervisor_state.workspace_ref,
+            standards_profile=planner_data.get("standards_profile", {}),
+            module_name=f"module_{supervisor_state.workflow_id[:8]}",
+        )
+    
+    @staticmethod
+    def supervisor_to_validation(supervisor_state: SupervisorState) -> ValidationState:
+        """Transform supervisor state to validation state."""
+        return ValidationState(
+            module_ref=supervisor_state.generated_module_ref,
+            workspace_ref=supervisor_state.workspace_ref,
+            policy_sets=supervisor_state.terraform_context.get("policy_sets", []) if supervisor_state.terraform_context else [],
+            quota_profile=supervisor_state.terraform_context.get("quota_profile", {}) if supervisor_state.terraform_context else {},
+        )
+    
+    @staticmethod
+    def supervisor_to_editor(supervisor_state: SupervisorState) -> EditorState:
+        """Transform supervisor state to editor state."""
+        return EditorState(
+            target_config_ref=supervisor_state.generated_module_ref,
+            change_request=supervisor_state.terraform_context or {},
+        )
+    
+    @staticmethod
+    def supervisor_to_security(supervisor_state: SupervisorState) -> SecurityState:
+        """Transform supervisor state to security state."""
+        return SecurityState(
+            module_ref=supervisor_state.generated_module_ref,
+            security_policies=supervisor_state.terraform_context.get("security_policies", []) if supervisor_state.terraform_context else [],
+            compliance_frameworks=supervisor_state.terraform_context.get("compliance_frameworks", []) if supervisor_state.terraform_context else [],
+        )
+    
+    @staticmethod
+    def supervisor_to_cost(supervisor_state: SupervisorState) -> CostState:
+        """Transform supervisor state to cost state."""
+        validation_data = supervisor_state.validation_data or {}
+        return CostState(
+            plan_json_ref=validation_data.get("terraform_plan", {}).get("plan_json_ref"),
+            region=supervisor_state.terraform_context.get("region", "us-east-1") if supervisor_state.terraform_context else "us-east-1",
+        )
+    
+    @staticmethod
+    def generation_to_supervisor(generation_state: GenerationState) -> Dict[str, Any]:
+        """Transform generation state back to supervisor updates."""
+        return {
+            "generation_data": {
+                "design_rationale": generation_state.design_rationale,
+                "file_plan": generation_state.file_plan,
+                "template_params": generation_state.template_params,
+                "module_manifest": generation_state.module_manifest,
+                "warnings": generation_state.warnings,
+                "best_practices_applied": generation_state.best_practices_applied,
+            },
+            "generated_module_ref": generation_state.generated_files_ref,
+            "question": generation_state.question,
+            "current_agent": AgentType.VALIDATION,
+        }
+    
+    @staticmethod
+    def validation_to_supervisor(validation_state: ValidationState) -> Dict[str, Any]:
+        """Transform validation state back to supervisor updates."""
+        return {
+            "validation_data": {
+                "static_analysis": validation_state.static_analysis,
+                "terraform_validate": validation_state.terraform_validate,
+                "terraform_plan": validation_state.terraform_plan,
+                "security_scans": validation_state.security_scans,
+                "compliance_checks": validation_state.compliance_checks,
+                "quota_evaluation": validation_state.quota_evaluation,
+                "blockers": validation_state.blockers,
+                "warnings": validation_state.warnings,
+            },
+            "validation_report_ref": validation_state.validation_report_ref,
+            "question": validation_state.question,
+            "current_agent": None,  # Supervisor decides next step
+        }
+    
+    @staticmethod
+    def editor_to_supervisor(editor_state: EditorState) -> Dict[str, Any]:
+        """Transform editor state back to supervisor updates."""
+        return {
+            "editor_data": {
+                "ast_notes": editor_state.ast_notes,
+                "formatting_profile": editor_state.formatting_profile,
+                "compatibility_findings": editor_state.compatibility_findings,
+                "surgical_changes": editor_state.surgical_changes,
+                "modified_files": editor_state.modified_files,
+                "migration_notes": editor_state.migration_notes,
+                "apply_risk": editor_state.apply_risk,
+                "rollback_strategy": editor_state.rollback_strategy,
+            },
+            "generated_module_ref": editor_state.patch_ref,
+            "question": editor_state.question,
+            "current_agent": None,  # Supervisor decides next step
+        }
+    
+    @staticmethod
+    def security_to_supervisor(security_state: SecurityState) -> Dict[str, Any]:
+        """Transform security state back to supervisor updates."""
+        return {
+            "security_data": {
+                "iam_analysis": security_state.iam_analysis,
+                "network_security": security_state.network_security,
+                "data_protection": security_state.data_protection,
+                "vulnerability_scan": security_state.vulnerability_scan,
+                "compliance_results": security_state.compliance_results,
+                "policy_violations": security_state.policy_violations,
+                "security_findings": security_state.security_findings,
+                "severity_counts": security_state.severity_counts,
+                "required_actions": security_state.required_actions,
+            },
+            "security_report_ref": security_state.security_report_ref,
+            "question": security_state.question,
+            "current_agent": None,  # Supervisor decides next step
+        }
+    
+    @staticmethod
+    def cost_to_supervisor(cost_state: CostState) -> Dict[str, Any]:
+        """Transform cost state back to supervisor updates."""
+        return {
+            "cost_data": {
+                "monthly_estimate": cost_state.monthly_estimate,
+                "annual_forecast": cost_state.annual_forecast,
+                "cost_breakdown": cost_state.cost_breakdown,
+                "resource_costs": cost_state.resource_costs,
+                "optimization_suggestions": cost_state.optimization_suggestions,
+                "potential_savings": cost_state.potential_savings,
+                "budget_alerts": cost_state.budget_alerts,
+                "cost_history": cost_state.cost_history,
+                "trend_analysis": cost_state.trend_analysis,
+            },
+            "cost_report_ref": cost_state.cost_report_ref,
+            "question": cost_state.question,
+            "current_agent": None,  # Supervisor decides next step
+        }
+    
+    # ============================================================================
+    # SUB-AGENT TRANSFORMATION METHODS
+    # ============================================================================
+    
+    # Note: Planner-related transformation methods have been removed.
+    # The planner sub-supervisor now manages its own state internally.
+
+
+# ============================================================================
 # TYPE ALIASES AND UTILITIES
 # ============================================================================
 
 # Type aliases for common patterns
-AgentState = Union[PlannerState, GenerationState, ValidationState, EditorState, SecurityState, CostState]
+AgentState = Union[GenerationState, ValidationState, EditorState, SecurityState, CostState]
 StateDict = Dict[str, Any]
 
 # LangGraph-compatible state type
@@ -496,7 +574,6 @@ MessagesState = Dict[str, Any]  # Simple alias for LangGraph's MessagesState
 def get_state_class(agent_type: AgentType) -> type:
     """Get the state class for a given agent type."""
     state_classes = {
-        AgentType.PLANNER: PlannerState,
         AgentType.GENERATION: GenerationState,
         AgentType.VALIDATION: ValidationState,
         AgentType.EDITOR: EditorState,
@@ -522,7 +599,7 @@ def create_supervisor_state(
         user_request=user_request,
         session_id=session_id,
         task_id=task_id,
-        mcp_context=mcp_context or {},
+        terraform_context=mcp_context or {},
         workflow_started_at=datetime.now(timezone.utc)
     )
 
@@ -564,12 +641,14 @@ __all__ = [
     
     # State schemas
     "SupervisorState",
-    "PlannerState",
     "GenerationState", 
     "ValidationState",
     "EditorState",
     "SecurityState",
     "CostState",
+    
+    # State transformation
+    "StateTransformer",
     
     # Type aliases
     "AgentState",

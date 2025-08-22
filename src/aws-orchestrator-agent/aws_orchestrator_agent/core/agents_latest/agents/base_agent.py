@@ -47,6 +47,26 @@ class BaseSubgraphAgent(ABC):
         """
         pass
     
+    @property
+    def memory(self):
+        """
+        Memory/checkpointer instance for this agent.
+        
+        Returns:
+            MemorySaver: The checkpointer instance used by this agent
+        """
+        return getattr(self, '_memory', None)
+    
+    @memory.setter
+    def memory(self, value):
+        """
+        Set the memory/checkpointer for this agent.
+        
+        Args:
+            value: MemorySaver instance to use for this agent
+        """
+        self._memory = value
+    
     @abstractmethod
     def build_graph(self) -> StateGraph:
         """

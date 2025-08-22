@@ -35,7 +35,7 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 class AgentColor(Enum):
-    CLOUD_CONFIG_GENERATOR = Fore.LIGHTBLUE_EX
+    PLANNER_SUPERVISOR = Fore.LIGHTGREEN_EX
     GENERATOR = Fore.YELLOW
     WEBSEARCH = Fore.LIGHTGREEN_EX
     ROUTER = Fore.MAGENTA

@@ -24,7 +24,7 @@ from aws_orchestrator_agent.core import (
     GenericAgentExecutor,
 )
 from aws_orchestrator_agent.core.agents_latest.supervisor_agent import create_supervisor_agent
-from aws_orchestrator_agent.core.agents_latest.agents.planner.planner_agent import create_planner_agent
+from aws_orchestrator_agent.core.agents_latest.agents.planner import create_planner_sub_supervisor_agent
 from aws_orchestrator_agent.core.task_lifecycle import TaskLifecycleManager
 from aws_orchestrator_agent.utils.logger import AgentLogger, log_sync
 
@@ -71,15 +71,15 @@ def main(host: str, port: int, agent_card: str, config_file: str) -> None:
         server_logger.log_structured(
             level="INFO",
             message="Creating specialized agents for custom supervisor",
-            extra={"agent_types": ["planner_agent"]}
+            extra={"agent_types": ["planner_sub_supervisor"]}
         )
         
-        # Create Planner Agent
-        planner_agent = create_planner_agent()
+        # Create Planner Sub-Supervisor Agent
+        planner_sub_supervisor = create_planner_sub_supervisor_agent(config=config)
         
         # Create Custom Supervisor Agent with agents
         supervisor_agent = create_supervisor_agent(
-            agents=[planner_agent],
+            agents=[planner_sub_supervisor],
             config=config,
             name="aws-orchestrator-supervisor"
         )

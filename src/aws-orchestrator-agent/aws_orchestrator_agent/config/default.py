@@ -20,7 +20,7 @@ class DefaultConfig:
     LLM_PROVIDER: str = "openai"
     LLM_MODEL: str = "gpt-4o"
     LLM_TEMPERATURE: float = 0.0
-    LLM_MAX_TOKENS: int = 1000
+    LLM_MAX_TOKENS: int = 8000
     
     # Logging Configuration
     LOG_LEVEL: str = "INFO"
