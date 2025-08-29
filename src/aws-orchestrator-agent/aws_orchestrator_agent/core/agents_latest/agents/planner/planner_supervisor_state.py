@@ -12,12 +12,14 @@ from typing import List, Optional, Dict, Any, Annotated
 from pydantic import BaseModel, Field, model_validator
 from langchain_core.messages import BaseMessage, AnyMessage
 from langgraph.graph.message import add_messages
+from aws_orchestrator_agent.utils.logger import AgentLogger
+logger = AgentLogger("PLANNER_SUPERVISOR_STATE")
 
 class PlanningWorkflowState(BaseModel):
     """State for tracking planning workflow progress with completion detection and loop prevention."""
     current_phase: str = Field(default="requirements_analysis", description="Current planning phase")
     requirements_complete: bool = Field(default=False, description="Requirements analysis complete")
-    dependencies_complete: bool = Field(default=False, description="Dependency mapping complete")
+    security_n_best_practices_evaluator_complete: bool = Field(default=False, description="security_n_best_practices_evaluator complete")
     execution_complete: bool = Field(default=False, description="Execution planning complete")
     planning_complete: bool = Field(default=False, description="Overall planning complete")
     loop_counter: int = Field(default=0, ge=0, le=10, description="Loop counter for infinite loop prevention")
@@ -30,7 +32,7 @@ class PlanningWorkflowState(BaseModel):
         """Check if all phases are complete."""
         return all([
             self.requirements_complete,
-            self.dependencies_complete,
+            self.security_n_best_practices_evaluator_complete,
             self.execution_complete
         ])
     
@@ -39,8 +41,8 @@ class PlanningWorkflowState(BaseModel):
         """Determine the next phase based on completion status."""
         if not self.requirements_complete:
             return "requirements_analysis"
-        elif not self.dependencies_complete:
-            return "dependency_mapping"
+        elif not self.security_n_best_practices_evaluator_complete:
+            return "security_n_best_practices_evaluator"
         elif not self.execution_complete:
             return "execution_planning"
         else:
@@ -57,8 +59,8 @@ class PlanningWorkflowState(BaseModel):
         """Mark a specific phase as complete."""
         if phase == "requirements_analysis":
             self.requirements_complete = True
-        elif phase == "dependency_mapping":
-            self.dependencies_complete = True
+        elif phase == "security_n_best_practices_evaluator":
+            self.security_n_best_practices_evaluator_complete = True
         elif phase == "execution_planning":
             self.execution_complete = True
         
@@ -71,20 +73,16 @@ class PlanningWorkflowState(BaseModel):
 
 class RequirementsData(BaseModel):
     """Data from Requirements Analyzer agent."""
-    business_requirements: List[str] = Field(default_factory=list, description="Business requirements")
-    technical_requirements: List[str] = Field(default_factory=list, description="Technical requirements")
-    constraints: List[str] = Field(default_factory=list, description="Constraints and limitations")
-    assumptions: List[str] = Field(default_factory=list, description="Assumptions and prerequisites")
-    risk_factors: List[str] = Field(default_factory=list, description="Risk factors")
-    scalability_requirements: List[str] = Field(default_factory=list, description="Scalability requirements")
-    performance_requirements: List[str] = Field(default_factory=list, description="Performance requirements")
-    validation_result: Optional[Dict[str, Any]] = Field(default=None, description="Validation results")
+    analysis_results: Optional[Dict[str, Any]] = Field(default=None, description="Analysis results")
     analysis_complete: bool = Field(default=False, description="Whether requirements analysis is complete")
     aws_service_mapping: Optional[Dict[str, Any]] = Field(default=None, description="AWS service mapping from discovery")
+    aws_service_mapping_complete: bool = Field(default=False, description="Whether AWS service mapping is complete")
+    terraform_attribute_mapping: Optional[Dict[str, Any]] = Field(default=None, description="Terraform attribute mapping from attribute mapping")
+    terraform_attribute_mapping_complete: bool = Field(default=False, description="Whether Terraform attribute mapping is complete")
     timestamp: Optional[str] = Field(default=None, description="Timestamp when analysis was completed")
 
-class DependencyData(BaseModel):
-    """Data from Dependency Mapper agent."""
+class Security_N_Best_Practices_Evaluator_Data(BaseModel):
+    """Data from security_n_best_practices_evaluator agent."""
     primary_service: str = Field(default="", description="Primary AWS service")
     mandatory_dependencies: List[Dict[str, Any]] = Field(default_factory=list, description="Mandatory dependencies")
     optional_dependencies: List[Dict[str, Any]] = Field(default_factory=list, description="Optional dependencies")
@@ -112,7 +110,7 @@ class ExecutionData(BaseModel):
 class PlanningResults(BaseModel):
     """Complete planning results from all phases."""
     requirements_data: RequirementsData = Field(default_factory=RequirementsData, description="Requirements analysis results")
-    dependency_data: DependencyData = Field(default_factory=DependencyData, description="Dependency mapping results")
+    security_n_best_practices_evaluator_data: Security_N_Best_Practices_Evaluator_Data = Field(default_factory=Security_N_Best_Practices_Evaluator_Data, description="security_n_best_practices_evaluator results")
     execution_data: ExecutionData = Field(default_factory=ExecutionData, description="Execution planning results")
     overall_complexity_score: int = Field(default=1, description="Overall complexity score (1-10)")
     estimated_deployment_time: str = Field(default="", description="Estimated deployment time")
@@ -163,9 +161,9 @@ class PlannerSupervisorState(BaseModel):
         default_factory=RequirementsData,
         description="Data from requirements analysis"
     )
-    dependency_data: DependencyData = Field(
-        default_factory=DependencyData,
-        description="Data from dependency mapping"
+    security_n_best_practices_evaluator_data: Security_N_Best_Practices_Evaluator_Data = Field(
+        default_factory=Security_N_Best_Practices_Evaluator_Data,
+        description="Data from security_n_best_practices_evaluator"
     )
     execution_data: ExecutionData = Field(
         default_factory=ExecutionData,
@@ -245,8 +243,6 @@ class PlannerSupervisorState(BaseModel):
             self.status = "in_progress"
         
         # Log phase completion
-        from aws_orchestrator_agent.utils.logger import AgentLogger
-        logger = AgentLogger("PLANNER_SUPERVISOR_STATE")
         logger.log_structured(
             level="INFO",
             message=f"Phase {phase} marked complete",
@@ -305,8 +301,8 @@ def update_planning_context(
     
     if phase == "requirements":
         workflow_state.requirements_complete = True
-    elif phase == "dependencies":
-        workflow_state.dependencies_complete = True
+    elif phase == "tf_security_n_best_practices_evaluator":
+        workflow_state.tf_security_n_best_practices_evaluator_complete = True
     elif phase == "execution":
         workflow_state.execution_complete = True
     elif phase == "complete":
@@ -316,7 +312,7 @@ def update_planning_context(
     planning_context = state.planning_context.copy()
     planning_context["planning_phase"] = phase
     planning_context["requirements_complete"] = workflow_state.requirements_complete
-    planning_context["dependencies_complete"] = workflow_state.dependencies_complete
+    planning_context["tf_security_n_best_practices_evaluator_complete"] = workflow_state.tf_security_n_best_practices_evaluator_complete
     planning_context["execution_complete"] = workflow_state.execution_complete
     planning_context["planning_complete"] = workflow_state.planning_complete
     

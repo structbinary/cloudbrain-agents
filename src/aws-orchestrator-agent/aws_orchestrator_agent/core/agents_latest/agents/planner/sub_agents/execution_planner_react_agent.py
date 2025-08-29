@@ -9,7 +9,9 @@ This module implements the Execution Planner as a React agent with tools:
 """
 
 import json
-from typing import Dict, Any, List
+from enum import Enum
+from datetime import datetime
+from typing import Dict, Any, List, Optional
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import JsonOutputParser
@@ -22,6 +24,392 @@ from aws_orchestrator_agent.utils.logger import AgentLogger
 
 # Create logger
 execution_logger = AgentLogger("EXECUTION_PLANNER_REACT")
+
+
+# Input Schema for Planning Request
+class VariableSpec(BaseModel):
+    """Specification for a Terraform variable to include in the module"""
+    name: str = Field(..., description="Variable name")
+    type: str = Field(..., description="Terraform variable type (string, number, bool, list, map, object)")
+    description: str = Field(..., description="Brief description of the variable")
+    default: Optional[str] = Field(None, description="Default value if variable is optional")
+    validation_regex: Optional[str] = Field(None, description="Validation regex pattern if applicable")
+    sensitive: bool = Field(False, description="Whether the variable contains sensitive data")
+
+class OutputSpec(BaseModel):
+    """Specification for a Terraform output to expose from the module"""
+    name: str = Field(..., description="Output variable name")
+    description: str = Field(..., description="Brief description of what this output represents")
+    value_reference: str = Field(..., description="Terraform expression that defines this output's value")
+
+class ModuleStructurePlanRequest(BaseModel):
+    """Input request for planning a Terraform module structure"""
+    service_name: str = Field(..., description="AWS service name (e.g., 'S3', 'EC2', 'VPC')")
+    security_requirements: List[str] = Field(
+        default_factory=list, 
+        description="List of security requirements (e.g., 'encryption', 'versioning', 'logging')"
+    )
+    variables: List[VariableSpec] = Field(
+        default_factory=list, 
+        description="Input variables planned for the module"
+    )
+    outputs: List[OutputSpec] = Field(
+        default_factory=list, 
+        description="Outputs expected from the module"
+    )
+    advanced_features: List[str] = Field(
+        default_factory=list, 
+        description="Advanced features to plan for (e.g., 'lifecycle_rules', 'cross_region_replication')"
+    )
+
+# Output Schema for Planning Response
+class TerraformFileRecommendation(BaseModel):
+    """Recommendation for a specific Terraform file in the module"""
+    filename: str = Field(..., description="Name of the Terraform file (e.g., 'main.tf', 'variables.tf')")
+    required: bool = Field(..., description="Whether this file is required for the module")
+    purpose: str = Field(..., description="Explanation of why this file is needed")
+    content_description: str = Field(..., description="What content should be included in this file")
+
+class VariableDefinitionPlan(BaseModel):
+    """Planned structure for a variable definition"""
+    name: str = Field(..., description="Variable name")
+    type: str = Field(..., description="Terraform variable type")
+    description: str = Field(..., description="Variable description")
+    default_value: Optional[str] = Field(None, description="Default value if applicable")
+    validation_rules: List[str] = Field(default_factory=list, description="Validation rules to apply")
+    sensitive: bool = Field(False, description="Whether variable is sensitive")
+    justification: str = Field(..., description="Why this variable is needed")
+
+class OutputDefinitionPlan(BaseModel):
+    """Planned structure for an output definition"""
+    name: str = Field(..., description="Output name")
+    description: str = Field(..., description="Output description")
+    value_expression: str = Field(..., description="Terraform expression for the output value")
+    sensitive: bool = Field(False, description="Whether output contains sensitive data")
+    justification: str = Field(..., description="Why this output is needed")
+
+class ReusabilityGuidance(BaseModel):
+    """Guidance on making the module reusable and composable"""
+    naming_conventions: List[str] = Field(default_factory=list, description="Recommended naming patterns")
+    tagging_strategy: List[str] = Field(default_factory=list, description="Recommended tagging approaches")
+    composability_hints: List[str] = Field(default_factory=list, description="How this module can compose with others")
+    best_practices: List[str] = Field(default_factory=list, description="Additional best practices to follow")
+
+class ModuleStructurePlanResponse(BaseModel):
+    """Complete planning response for a Terraform module structure"""
+    service_name: str = Field(..., description="AWS service this module targets")
+    recommended_files: List[TerraformFileRecommendation] = Field(
+        ..., 
+        description="List of recommended Terraform files for the module"
+    )
+    variable_definitions: List[VariableDefinitionPlan] = Field(
+        default_factory=list, 
+        description="Planned variable definitions with validation"
+    )
+    output_definitions: List[OutputDefinitionPlan] = Field(
+        default_factory=list, 
+        description="Planned output definitions"
+    )
+    security_considerations: List[str] = Field(
+        default_factory=list, 
+        description="Security best practices incorporated into the plan"
+    )
+    reusability_guidance: ReusabilityGuidance = Field(
+        ..., 
+        description="Guidance on making the module reusable and composable"
+    )
+    implementation_notes: List[str] = Field(
+        default_factory=list, 
+        description="Additional notes for implementation teams"
+        )
+
+# Input Schema - Takes output from Module Structure Generator
+class ModuleStructurePlan(BaseModel):
+    """Output from Module Structure Generator Tool"""
+    service_name: str = Field(..., description="AWS service name (e.g., 'S3', 'EC2', 'VPC')")
+    recommended_files: List[str] = Field(..., description="List of recommended Terraform files")
+    variable_definitions: List[Dict[str, Any]] = Field(..., description="Planned variable definitions")
+    output_definitions: List[Dict[str, Any]] = Field(..., description="Planned output definitions")
+    security_considerations: List[str] = Field(default_factory=list, description="Security requirements")
+
+class OptimizationTarget(str, Enum):
+    COST = "cost"
+    PERFORMANCE = "performance"  
+    SECURITY = "security"
+    ALL = "all"
+
+class ResourceSizingContext(BaseModel):
+    """Context for resource sizing optimization"""
+    environment: str = Field(..., description="Environment (dev, staging, prod)")
+    expected_load: Optional[str] = Field(None, description="Expected workload (low, medium, high)")
+    budget_constraints: Optional[str] = Field(None, description="Budget limitations if any")
+    compliance_requirements: List[str] = Field(default_factory=list, description="Compliance requirements (SOC2, HIPAA, etc.)")
+
+class ConfigurationOptimizerRequest(BaseModel):
+    """Input request for configuration optimization"""
+    module_plan: ModuleStructurePlan = Field(..., description="Module structure plan from previous tool")
+    optimization_targets: List[OptimizationTarget] = Field(..., description="What to optimize for")
+    resource_sizing_context: ResourceSizingContext = Field(..., description="Context for optimization decisions")
+    organization_standards: Optional[Dict[str, Any]] = Field(None, description="Organization-specific naming/tagging standards")
+
+# Output Schema - Optimization Recommendations
+class CostOptimization(BaseModel):
+    """Cost optimization recommendations"""
+    resource_name: str = Field(..., description="Resource being optimized")
+    current_configuration: str = Field(..., description="Current configuration")
+    optimized_configuration: str = Field(..., description="Cost-optimized configuration")
+    estimated_savings: Optional[str] = Field(None, description="Estimated monthly savings")
+    justification: str = Field(..., description="Why this optimization saves costs")
+
+class PerformanceOptimization(BaseModel):
+    """Performance optimization recommendations"""
+    resource_name: str = Field(..., description="Resource being optimized")
+    current_configuration: str = Field(..., description="Current configuration")
+    optimized_configuration: str = Field(..., description="Performance-optimized configuration")
+    performance_impact: str = Field(..., description="Expected performance improvement")
+    justification: str = Field(..., description="Why this optimization improves performance")
+
+class SecurityOptimization(BaseModel):
+    """Security optimization recommendations"""
+    resource_name: str = Field(..., description="Resource being optimized")
+    security_issue: str = Field(..., description="Security concern identified")
+    current_configuration: str = Field(..., description="Current configuration")
+    secure_configuration: str = Field(..., description="Security-hardened configuration")
+    severity: str = Field(..., description="Severity level (low, medium, high, critical)")
+    justification: str = Field(..., description="Why this change improves security")
+
+class SyntaxValidation(BaseModel):
+    """Terraform syntax and structure validation results"""
+    file_name: str = Field(..., description="File being validated")
+    validation_status: str = Field(..., description="Valid, Invalid, or Warning")
+    issues_found: List[str] = Field(default_factory=list, description="Syntax or structural issues")
+    recommendations: List[str] = Field(default_factory=list, description="Recommendations to fix issues")
+
+class NamingConvention(BaseModel):
+    """Naming convention recommendations"""
+    resource_type: str = Field(..., description="Type of resource (variable, output, resource)")
+    current_name: str = Field(..., description="Current name")
+    recommended_name: str = Field(..., description="Name following conventions")
+    convention_rule: str = Field(..., description="Convention rule applied")
+
+class TaggingStrategy(BaseModel):
+    """Tagging strategy recommendations"""
+    resource_name: str = Field(..., description="Resource to be tagged")
+    required_tags: Dict[str, str] = Field(..., description="Required tags based on organization standards")
+    optional_tags: Dict[str, str] = Field(default_factory=dict, description="Recommended optional tags")
+    tagging_justification: str = Field(..., description="Why these tags are recommended")
+
+class ConfigurationOptimizerResponse(BaseModel):
+    """Complete optimization response"""
+    service_name: str = Field(..., description="AWS service being optimized")
+    cost_optimizations: List[CostOptimization] = Field(default_factory=list, description="Cost optimization recommendations")
+    performance_optimizations: List[PerformanceOptimization] = Field(default_factory=list, description="Performance optimization recommendations") 
+    security_optimizations: List[SecurityOptimization] = Field(default_factory=list, description="Security optimization recommendations")
+    syntax_validations: List[SyntaxValidation] = Field(default_factory=list, description="Syntax validation results")
+    naming_conventions: List[NamingConvention] = Field(default_factory=list, description="Naming convention recommendations")
+    tagging_strategies: List[TaggingStrategy] = Field(default_factory=list, description="Tagging strategy recommendations")
+    estimated_monthly_cost: Optional[str] = Field(None, description="Estimated monthly cost after optimizations")
+    optimization_summary: str = Field(..., description="Summary of all optimizations applied")
+    implementation_priority: List[str] = Field(default_factory=list, description="Priority order for implementing optimizations")
+
+## Terraform State Management
+
+# Input Schema
+class InfrastructureScale(str, Enum):
+    SMALL = "small"          # < 50 resources
+    MEDIUM = "medium"        # 50-200 resources  
+    LARGE = "large"          # 200-500 resources
+    ENTERPRISE = "enterprise" # 500+ resources
+
+class Environment(str, Enum):
+    DEVELOPMENT = "development"
+    STAGING = "staging"
+    PRODUCTION = "production"
+    SHARED = "shared"
+
+class TeamStructure(BaseModel):
+    """Team structure information for state planning"""
+    team_size: int = Field(..., description="Number of team members working on infrastructure")
+    teams: List[str] = Field(..., description="List of teams (e.g., ['platform', 'backend', 'frontend'])")
+    concurrent_operations: bool = Field(..., description="Whether teams work on infrastructure concurrently")
+    ci_cd_integration: bool = Field(..., description="Whether CI/CD pipelines will use Terraform")
+
+class ComplianceRequirements(BaseModel):
+    """Compliance and security requirements"""
+    encryption_required: bool = Field(True, description="Whether encryption is required for state files")
+    audit_logging: bool = Field(False, description="Whether audit logging is required")
+    backup_retention_days: Optional[int] = Field(None, description="Backup retention period in days")
+    compliance_standards: List[str] = Field(default_factory=list, description="Compliance standards (SOC2, HIPAA, etc.)")
+
+class StateManagementPlannerRequest(BaseModel):
+    """Input request for state management planning"""
+    service_name: str = Field(..., description="AWS service or infrastructure component")
+    infrastructure_scale: InfrastructureScale = Field(..., description="Scale of infrastructure")
+    environments: List[Environment] = Field(..., description="Environments to support")
+    team_structure: TeamStructure = Field(..., description="Team structure information")
+    compliance_requirements: ComplianceRequirements = Field(..., description="Compliance and security requirements")
+    aws_region: str = Field(..., description="Primary AWS region")
+    multi_region: bool = Field(False, description="Whether infrastructure spans multiple regions")
+    existing_state_files: Optional[List[str]] = Field(None, description="Existing state files to consider for migration")
+
+# Output Schema - State Management Plan
+class BackendConfiguration(BaseModel):
+    """S3 backend configuration recommendation"""
+    bucket_name: str = Field(..., description="Recommended S3 bucket name")
+    key_pattern: str = Field(..., description="Key pattern for state files")
+    region: str = Field(..., description="AWS region for the backend")
+    encrypt: bool = Field(..., description="Whether to enable encryption")
+    versioning: bool = Field(..., description="Whether to enable versioning")
+    kms_key_id: Optional[str] = Field(None, description="KMS key ID for encryption if specified")
+    server_side_encryption_configuration: Dict[str, Any] = Field(..., description="S3 encryption configuration")
+
+class StateLockingConfiguration(BaseModel):
+    """DynamoDB state locking configuration"""
+    table_name: str = Field(..., description="DynamoDB table name for state locking")
+    billing_mode: str = Field(..., description="Billing mode (PAY_PER_REQUEST or PROVISIONED)")
+    hash_key: str = Field("LockID", description="Primary key for the table")
+    region: str = Field(..., description="AWS region for DynamoDB table")
+    point_in_time_recovery: bool = Field(..., description="Whether to enable point-in-time recovery")
+    tags: Dict[str, str] = Field(..., description="Tags for the DynamoDB table")
+
+class StateSplittingStrategy(BaseModel):
+    """Strategy for organizing and splitting state files"""
+    splitting_approach: str = Field(..., description="Approach for state splitting")
+    state_files: List[Dict[str, str]] = Field(..., description="List of recommended state files with descriptions")
+    dependencies: List[Dict[str, Any]] = Field(..., description="Dependencies between state files")
+    data_source_usage: List[str] = Field(..., description="How to use terraform_remote_state data sources")
+
+class BackendSecurityRecommendations(BaseModel):
+    """Security recommendations for the backend"""
+    iam_policies: List[Dict[str, str]] = Field(..., description="IAM policies for backend access")
+    bucket_policies: List[Dict[str, Any]] = Field(..., description="S3 bucket policies")
+    access_controls: List[str] = Field(..., description="Access control recommendations")
+    monitoring: List[str] = Field(..., description="Monitoring and alerting recommendations")
+
+class StateManagementPlannerResponse(BaseModel):
+    """Complete state management plan"""
+    service_name: str = Field(..., description="AWS service being planned")
+    infrastructure_scale: str = Field(..., description="Infrastructure scale")
+    backend_configuration: BackendConfiguration = Field(..., description="S3 backend configuration")
+    state_locking_configuration: StateLockingConfiguration = Field(..., description="DynamoDB locking configuration")
+    state_splitting_strategy: StateSplittingStrategy = Field(..., description="State splitting and organization strategy")
+    security_recommendations: BackendSecurityRecommendations = Field(..., description="Security recommendations")
+    migration_plan: Optional[List[str]] = Field(None, description="Migration plan if existing state files present")
+    implementation_steps: List[str] = Field(..., description="Step-by-step implementation guide")
+    best_practices: List[str] = Field(..., description="State management best practices")
+    monitoring_setup: List[str] = Field(..., description="Monitoring and alerting setup recommendations")
+    disaster_recovery: List[str] = Field(..., description="Backup and disaster recovery recommendations")
+
+
+## Terraform Execution Planner Pydantic Models
+# Enhanced schemas for comprehensive module specification
+class VariableDefinition(BaseModel):
+    """Complete variable definition with all attributes"""
+    name: str = Field(..., description="Variable name")
+    type: str = Field(..., description="Terraform variable type")
+    description: str = Field(..., description="Variable description")
+    default: Optional[Any] = Field(None, description="Default value")
+    sensitive: bool = Field(False, description="Whether variable is sensitive")
+    nullable: bool = Field(False, description="Whether variable can be null")
+    validation_rules: List[Dict[str, str]] = Field(default_factory=list, description="Validation blocks")
+    example_values: List[Any] = Field(default_factory=list, description="Example values for documentation")
+
+class LocalValue(BaseModel):
+    """Local value definition"""
+    name: str = Field(..., description="Local value name")
+    expression: str = Field(..., description="Terraform expression")
+    description: str = Field(..., description="Purpose and usage description")
+    depends_on: List[str] = Field(default_factory=list, description="Dependencies on variables or other locals")
+
+class DataSource(BaseModel):
+    """Data source definition"""
+    resource_name: str = Field(..., description="Data source resource name (e.g., 'current_caller_identity')")
+    data_source_type: str = Field(..., description="Data source type (e.g., 'aws_caller_identity')")
+    configuration: Dict[str, Any] = Field(..., description="Data source configuration")
+    description: str = Field(..., description="Purpose of this data source")
+    exported_attributes: List[str] = Field(..., description="Attributes that will be referenced")
+
+class OutputDefinition(BaseModel):
+    """Complete output definition"""
+    name: str = Field(..., description="Output name")
+    value: str = Field(..., description="Output value expression")
+    description: str = Field(..., description="Output description")
+    sensitive: bool = Field(False, description="Whether output is sensitive")
+    depends_on: List[str] = Field(default_factory=list, description="Explicit dependencies")
+    precondition: Optional[Dict[str, str]] = Field(None, description="Precondition block if needed")
+
+class IAMPolicyDocument(BaseModel):
+    """IAM policy document specification"""
+    policy_name: str = Field(..., description="Policy identifier")
+    version: str = Field("2012-10-17", description="Policy version")
+    statements: List[Dict[str, Any]] = Field(..., description="Policy statements")
+    description: str = Field(..., description="Policy purpose")
+    resource_references: List[str] = Field(..., description="Resources this policy applies to")
+
+class ResourceConfiguration(BaseModel):
+    """Complete resource configuration"""
+    resource_address: str = Field(..., description="Full resource address")
+    resource_type: str = Field(..., description="AWS resource type")
+    resource_name: str = Field(..., description="Resource instance name")
+    configuration: Dict[str, Any] = Field(..., description="Complete resource configuration")
+    depends_on: List[str] = Field(default_factory=list, description="Resource dependencies")
+    lifecycle_rules: Optional[Dict[str, Any]] = Field(None, description="Lifecycle configuration")
+    tags: Dict[str, str] = Field(default_factory=dict, description="Resource tags")
+    description: str = Field(..., description="Resource purpose")
+
+class TerraformFile(BaseModel):
+    """Terraform file specification"""
+    filename: str = Field(..., description="Filename (e.g., main.tf)")
+    purpose: str = Field(..., description="File purpose")
+    content_sections: List[str] = Field(..., description="Ordered list of content sections")
+    includes_resources: List[str] = Field(default_factory=list, description="Resources defined in this file")
+    includes_variables: List[str] = Field(default_factory=list, description="Variables defined in this file")
+    includes_outputs: List[str] = Field(default_factory=list, description="Outputs defined in this file")
+
+class ModuleExample(BaseModel):
+    """Module usage example"""
+    example_name: str = Field(..., description="Example scenario name")
+    description: str = Field(..., description="What this example demonstrates")
+    module_call: str = Field(..., description="Complete module block code")
+    required_variables: Dict[str, Any] = Field(..., description="Required variable values")
+    expected_outputs: List[str] = Field(..., description="Expected outputs from this example")
+
+class ComprehensiveExecutionPlanResponse(BaseModel):
+    """Complete execution plan with full module specification"""
+    service_name: str = Field(..., description="AWS service being deployed")
+    module_name: str = Field(..., description="Module name")
+    target_environment: str = Field(..., description="Target deployment environment")
+    plan_generation_timestamp: datetime = Field(default_factory=datetime.now)
+    
+    # Complete module specification
+    terraform_files: List[TerraformFile] = Field(..., description="All Terraform files to be created")
+    variable_definitions: List[VariableDefinition] = Field(..., description="Complete variable specifications")
+    local_values: List[LocalValue] = Field(..., description="Local value definitions")
+    data_sources: List[DataSource] = Field(..., description="Data source definitions")
+    output_definitions: List[OutputDefinition] = Field(..., description="Output specifications")
+    resource_configurations: List[ResourceConfiguration] = Field(..., description="Complete resource configurations")
+    iam_policies: List[IAMPolicyDocument] = Field(default_factory=list, description="IAM policy documents")
+    
+    # Module documentation and examples
+    module_description: str = Field(..., description="Comprehensive module description")
+    usage_examples: List[ModuleExample] = Field(..., description="Usage examples for different scenarios")
+    readme_content: str = Field(..., description="Complete README.md content")
+    
+    # Provider and version requirements
+    required_providers: Dict[str, Dict[str, str]] = Field(..., description="Provider requirements")
+    terraform_version_constraint: str = Field(..., description="Minimum Terraform version")
+    
+    # Deployment and operational details
+    resource_dependencies: List[Dict[str, Any]] = Field(..., description="Resource dependency graph")
+    deployment_phases: List[Dict[str, Any]] = Field(..., description="Deployment phases")
+    estimated_costs: Dict[str, str] = Field(default_factory=dict, description="Cost estimates by resource type")
+    security_considerations: List[str] = Field(..., description="Security considerations and warnings")
+    
+    # Testing and validation
+    validation_rules: List[str] = Field(..., description="Built-in validation rules")
+    testing_strategy: List[str] = Field(..., description="Recommended testing approaches")
+    compliance_checks: List[str] = Field(..., description="Compliance validations built into module")
+
 
 class ExecutionPlan(BaseModel):
     """Output schema for execution planning."""

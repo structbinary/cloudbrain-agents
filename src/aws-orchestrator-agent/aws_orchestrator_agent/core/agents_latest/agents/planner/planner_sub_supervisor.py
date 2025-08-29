@@ -13,6 +13,7 @@ import json
 import traceback
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
+import re
 from functools import wraps
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
@@ -33,7 +34,7 @@ from .planner_supervisor_state import (
 from .planner_handoff_tools import create_planner_handoff_tools
 from .sub_agents import (
     create_requirements_analyzer_react_agent,
-    create_dependency_mapper_react_agent,
+    create_security_n_best_practices_react_agent,
     create_execution_planner_react_agent
 )
 
@@ -81,6 +82,8 @@ class PlannerSubSupervisorAgent(BaseSubgraphAgent):
         
         # Set agent name for identification
         self._name = name
+        
+        self._planner_supervisor_state = PlannerSupervisorState()
         
         # Set shared memory
         self.memory = memory or MemorySaver()
@@ -215,7 +218,7 @@ class PlannerSubSupervisorAgent(BaseSubgraphAgent):
                 extra={}
             )
             
-            self.requirements_analyzer = create_requirements_analyzer_react_agent(self.config_instance)
+            self.requirements_analyzer = create_requirements_analyzer_react_agent(state=self._planner_supervisor_state, config=self.config_instance)
             
             planner_supervisor_logger.log_structured(
                 level="DEBUG",
@@ -231,13 +234,13 @@ class PlannerSubSupervisorAgent(BaseSubgraphAgent):
                 extra={}
             )
             
-            self.dependency_mapper = create_dependency_mapper_react_agent(self.config_instance)
+            self.security_n_best_practices_evaluator = create_security_n_best_practices_react_agent(state=self._planner_supervisor_state, config=self.config_instance)
             
             planner_supervisor_logger.log_structured(
                 level="DEBUG",
-                message="Dependency mapper created",
+                message="tf_security_n_best_practices_evaluator created",
                 extra={
-                    "dependency_mapper_type": type(self.dependency_mapper).__name__
+                    "security_n_best_practices_evaluator_type": type(self.security_n_best_practices_evaluator).__name__
                 }
             )
             
@@ -247,7 +250,7 @@ class PlannerSubSupervisorAgent(BaseSubgraphAgent):
                 extra={}
             )
             
-            self.execution_planner = create_execution_planner_react_agent(self.config_instance)
+            self.execution_planner = create_execution_planner_react_agent(config=self.config_instance)
             
             planner_supervisor_logger.log_structured(
                 level="DEBUG",
@@ -262,11 +265,11 @@ class PlannerSubSupervisorAgent(BaseSubgraphAgent):
                 message="=== SUB-AGENTS INITIALIZATION COMPLETE ===",
                 extra={
                     "requirements_analyzer": "requirements_analyzer",
-                    "dependency_mapper": "dependency_mapper",
+                    "security_n_best_practices_evaluator": "security_n_best_practices_evaluator",
                     "execution_planner": "execution_planner",
                     "all_agents_created": all([
                         hasattr(self, 'requirements_analyzer'),
-                        hasattr(self, 'dependency_mapper'),
+                        hasattr(self, 'security_n_best_practices_evaluator'),
                         hasattr(self, 'execution_planner')
                     ])
                 }
@@ -297,18 +300,18 @@ Your role is to:
 
 Available agents:
 - requirements_analyzer: Analyzes business and technical requirements
-- dependency_mapper: Maps AWS service dependencies and generates questions
+- security_n_best_practices_evaluator: Evaluates security and best practices of the AWS service
 - execution_planner: Creates execution plans and assesses risks
 
 Available handoff tools:
 - handoff_to_requirements_analyzer: Transfer to requirements analysis
-- handoff_to_dependency_mapper: Transfer to dependency mapping
+- handoff_to_security_n_best_practices_evaluator: Transfer to security_n_best_practices_evaluator
 - handoff_to_execution_planner: Transfer to execution planning
 - handoff_to_planner_complete: Mark planning complete and return to main supervisor
 
 Planning workflow:
 1. Start with requirements analysis (ALWAYS start here)
-2. Move to dependency mapping (may require user input)
+2. Move to security_n_best_practices_evaluator (may require user input)
 3. Complete with execution planning
 4. Mark planning complete when all phases are done
 
@@ -335,9 +338,9 @@ ROUTING DECISIONS:
 2. Check workflow_state.next_phase to determine routing:
    - If next_phase == "requirements_analysis" and not requirements_complete:
      → handoff_to_requirements_analyzer
-   - If next_phase == "dependency_mapping" and requirements_complete:
-     → handoff_to_dependency_mapper  
-   - If next_phase == "execution_planning" and dependencies_complete:
+   - If next_phase == "security_n_best_practices_evaluator" and requirements_complete:
+     → handoff_to_security_n_best_practices_evaluator  
+   - If next_phase == "execution_planning" and security_n_best_practices_evaluator_complete:
      → handoff_to_execution_planner
    - If next_phase == None (all phases complete):
      → handoff_to_planner_complete
@@ -362,6 +365,129 @@ When you receive a request:
             ("human", "{user_request}")
         ])
     
+    def _process_subsequent_request(self, state: PlannerSupervisorState) -> None:
+        """
+        Process subsequent requests by checking for agent completions and updating state.
+        
+        Args:
+            state: The current planner supervisor state
+        """
+        # Log the processing
+        planner_supervisor_logger.log_structured(
+            level="DEBUG",
+            message="Processing subsequent request - checking for agent outputs",
+            extra={
+                "current_phase": getattr(state.workflow_state, 'current_phase', ''),
+                "planning_complete": getattr(state.workflow_state, 'planning_complete', False)
+            }
+        )
+        
+        # Increment loop counter and check for errors
+        state.increment_loop_counter()
+        if state.workflow_state.error_occurred:
+            planner_supervisor_logger.log_structured(
+                level="ERROR",
+                message="Loop limit exceeded in pre-model hook",
+                extra={
+                    "loop_counter": state.workflow_state.loop_counter,
+                    "error_message": state.workflow_state.error_message
+                }
+            )
+            return
+        
+        # Check for agent completions in recent messages
+        if state.messages:
+            recent_messages = state.messages[-3:]  # Check last 3 messages
+            for message in recent_messages:
+                if isinstance(message, AIMessage) and hasattr(message, 'content'):
+                    self._process_message_for_completion(state, message)
+
+    def _process_message_for_completion(self, state: PlannerSupervisorState, message: AIMessage) -> None:
+        """
+        Process a single message for agent completion indicators.
+        
+        Args:
+            state: The current planner supervisor state
+            message: The AIMessage to process
+        """
+        content = message.content.lower()
+        has_agent_completion = 'agent_completion' in content
+        
+        if has_agent_completion and not state.workflow_state.planning_complete:
+            self._handle_agent_completion(state, content)
+
+    def _handle_agent_completion(self, state: PlannerSupervisorState, content: str) -> None:
+        """
+        Handle agent completion data and update state accordingly.
+        
+        Args:
+            state: The current planner supervisor state
+            content: The message content containing completion data
+        """
+        try:
+            # Parse the completion data
+            completion_data = json.loads(content)
+            
+            if 'agent_completion' in completion_data:
+                agent_completion = completion_data['agent_completion']
+                agent_name = agent_completion.get('agent_name', 'unknown')
+                task_type = agent_completion.get('task_type', 'unknown')
+                
+                # Handle different agent types
+                if agent_name == 'requirements_analyzer' and task_type == 'terraform_attribute_mapping':
+                    self._handle_requirements_analyzer_completion(state, completion_data, agent_completion)
+                # Future agents can be added here
+                # elif agent_name == 'tf_security_n_best_practices_evaluator':
+                #     self._handle_security_analyzer_completion(state, completion_data, agent_completion)
+                
+        except (json.JSONDecodeError, Exception) as e:
+            planner_supervisor_logger.log_structured(
+                level="WARNING",
+                message="Failed to process agent completion data",
+                extra={"error": str(e), "content_preview": content[:200]}
+            )
+
+    def _handle_requirements_analyzer_completion(self, state: PlannerSupervisorState, completion_data: dict, agent_completion: dict) -> None:
+        """
+        Handle requirements analyzer completion specifically.
+        
+        Args:
+            state: The current planner supervisor state
+            completion_data: The parsed completion data
+            agent_completion: The agent completion metadata
+        """
+        # Store the new terraform attribute mapping data
+        state.requirements_data.terraform_attribute_mapping = completion_data
+        state.requirements_data.terraform_attribute_mapping_complete = True
+        
+        # Preserve existing requirements data from previous state
+        existing_data = self._planner_supervisor_state.requirements_data
+        if existing_data:
+            state.requirements_data.aws_service_mapping = existing_data.aws_service_mapping
+            state.requirements_data.aws_service_mapping_complete = existing_data.aws_service_mapping_complete
+            state.requirements_data.analysis_results = existing_data.analysis_results
+            state.requirements_data.analysis_complete = existing_data.analysis_complete
+        
+        # Log completion
+        planner_supervisor_logger.log_structured(
+            level="INFO",
+            message="Requirements analyzer terraform attribute mapping completed",
+            extra={
+                "agent_name": agent_completion.get('agent_name'),
+                "task_type": agent_completion.get('task_type'),
+                "data_type": agent_completion.get('data_type'),
+                "services_count": len(completion_data.get('services', [])),
+                "total_resources": sum(len(service.get('terraform_resources', [])) for service in completion_data.get('services', [])),
+                "completion_timestamp": agent_completion.get('timestamp')
+            }
+        )
+        
+        # Mark phase complete
+        state.set_phase_complete("requirements_analysis")
+        
+        # Update timestamp
+        state.requirements_data.timestamp = datetime.now().isoformat()
+
     def build_graph(self) -> StateGraph:
         """
         Build the LangGraph StateGraph for the planner sub-supervisor agent.
@@ -416,7 +542,7 @@ When you receive a request:
             )
             
             # Create pre-model hook to transform incoming state
-            def pre_model_hook(state: Any) -> Any:
+            def pre_model_hook(state: PlannerSupervisorState) -> PlannerSupervisorState:
                 """Transform incoming state to properly extract user_request and other context."""
                 try:
                     planner_supervisor_logger.log_structured(
@@ -428,125 +554,107 @@ When you receive a request:
                         }
                     )
                     
-                    # Extract values directly from the PlannerSupervisorState messages
-                    user_request = ""
-                    task_description = ""
-                    session_id = None
-                    task_id = None
+                    # Check if this is a subsequent request (not first time)
+                    is_subsequent_request = all([
+                        hasattr(state, 'user_request') and state.user_request,
+                        hasattr(state, 'task_description') and state.task_description,
+                        hasattr(state, 'session_id') and state.session_id,
+                        hasattr(state, 'task_id') and state.task_id
+                    ])
                     
-                    if state.messages:
+                    if is_subsequent_request:
+                        # Process subsequent request - check for agent completions
+                        self._process_subsequent_request(state)
                         
-                        for message in state.messages:
-                            # Handle HumanMessage
-                            if isinstance(message, HumanMessage):
-                                if hasattr(message, 'content') and message.content:
-                                    user_request = message.content
-                                
-                                if hasattr(message, 'additional_kwargs') and message.additional_kwargs:
-                                    session_id = message.additional_kwargs.get('session_id', session_id)
-                                    task_id = message.additional_kwargs.get('task_id', task_id)
-                            
-                            # Handle AIMessage
-                            elif isinstance(message, AIMessage):
-                                if (hasattr(message, 'additional_kwargs') and 
-                                    message.additional_kwargs and 
-                                    'tool_calls' in message.additional_kwargs and
-                                    message.additional_kwargs['tool_calls']):
-                                    
-                                    for tool_call in message.additional_kwargs['tool_calls']:
-                                        if ('function' in tool_call and 
-                                            'arguments' in tool_call['function'] and
-                                            tool_call['function']['name'] == 'transfer_to_planner_sub_supervisor'):
-                                            
-                                            try:
-                                                args = json.loads(tool_call['function']['arguments'])
-                                                task_description = args.get('task_description', '')
-                                            except json.JSONDecodeError:
-                                                task_description = tool_call['function']['arguments']
-                                            break
-                            
-                            # Handle SystemMessage (if needed)
-                            elif isinstance(message, SystemMessage):
-                                # System messages typically don't contain user data
-                                pass
-                    
-                    planner_supervisor_logger.log_structured(
-                        level="INFO",
-                        message="Pre-model hook: Extracted values from messages",
-                        extra={
-                            "extracted_user_request": user_request,
-                            "extracted_task_description": task_description,
-                            "extracted_session_id": session_id,
-                            "extracted_task_id": task_id
-                        }
-                    )
-                    
-                    # Update the PlannerSupervisorState directly
-                    state.user_request = user_request
-                    state.task_description = task_description
-                    state.session_id = session_id
-                    state.task_id = task_id
-                    
-                    # Create llm_input_messages with the extracted user request
-                    # langgraph-supervisor expects llm_input_messages field for LLM calls
-                    llm_input_messages = [HumanMessage(content=user_request)]
-                    
-                    # Add llm_input_messages to the state
-                    state.llm_input_messages = llm_input_messages
-                    
-                    # CRITICAL: Increment loop counter and check for limits
-                    state.increment_loop_counter()
-                    
-                    # Check for loop limit exceeded
-                    if state.workflow_state.error_occurred:
+                        # Create llm_input_messages for subsequent requests
+                        llm_input_messages = [HumanMessage(content=state.user_request)]
+                        state.llm_input_messages = llm_input_messages
+                        
+                    else:
+                        # SECOND CONDITION: This IS the first request - extract user_request, task_description, etc.
                         planner_supervisor_logger.log_structured(
-                            level="ERROR",
-                            message="Loop limit exceeded in pre-model hook",
+                            level="DEBUG",
+                            message="Pre-model hook: Processing first request - extracting user_request, task_description, etc.",
+                            extra={"messages_count": len(state.messages) if hasattr(state, 'messages') else 0}
+                        )
+                        
+                        # Extract values directly from the PlannerSupervisorState messages
+                        user_request = ""
+                        task_description = ""
+                        session_id = None
+                        task_id = None
+                        
+                        if state.messages:
+                            for message in state.messages:
+                                # Handle HumanMessage
+                                if isinstance(message, HumanMessage):
+                                    if hasattr(message, 'content') and message.content:
+                                        user_request = message.content
+                                    
+                                    if hasattr(message, 'additional_kwargs') and message.additional_kwargs:
+                                        session_id = message.additional_kwargs.get('session_id', session_id)
+                                        task_id = message.additional_kwargs.get('task_id', task_id)
+                                
+                                # Handle AIMessage
+                                elif isinstance(message, AIMessage):
+                                    if (hasattr(message, 'additional_kwargs') and 
+                                        message.additional_kwargs and 
+                                        'tool_calls' in message.additional_kwargs and
+                                        message.additional_kwargs['tool_calls']):
+                                        
+                                        for tool_call in message.additional_kwargs['tool_calls']:
+                                            if ('function' in tool_call and 
+                                                'arguments' in tool_call['function'] and
+                                                tool_call['function']['name'] == 'transfer_to_planner_sub_supervisor'):
+                                                
+                                                try:
+                                                    args = json.loads(tool_call['function']['arguments'])
+                                                    task_description = args.get('task_description', '')
+                                                except json.JSONDecodeError:
+                                                    task_description = tool_call['function']['arguments']
+                                                break
+                                
+                                # Handle SystemMessage (if needed)
+                                elif isinstance(message, SystemMessage):
+                                    # System messages typically don't contain user data
+                                    pass
+                        
+                        planner_supervisor_logger.log_structured(
+                            level="INFO",
+                            message="Pre-model hook: Extracted values from first request",
                             extra={
-                                "loop_counter": state.workflow_state.loop_counter,
-                                "error_message": state.workflow_state.error_message
+                                "extracted_user_request": user_request,
+                                "extracted_task_description": task_description,
+                                "extracted_session_id": session_id,
+                                "extracted_task_id": task_id
                             }
                         )
-                        return state
-                    
-                    # Check for completion detection in recent messages
-                    if state.messages:
-                        # Look for completion indicators in recent messages
-                        recent_messages = state.messages[-3:]  # Check last 3 messages
-                        for message in recent_messages:
-                            if isinstance(message, AIMessage) and hasattr(message, 'content'):
-                                content = message.content.lower()
-                                # Check if Requirements Analyzer completed
-                                if ("requirements analysis completed" in content or 
-                                    "aws service discovery completed" in content or
-                                    "completion_ready: true" in content):
-                                    if not state.workflow_state.requirements_complete:
-                                        state.set_phase_complete("requirements_analysis")
-                                        planner_supervisor_logger.log_structured(
-                                            level="INFO",
-                                            message="Requirements analysis completion detected",
-                                            extra={
-                                                "completion_source": "message_content",
-                                                "current_phase": state.workflow_state.current_phase,
-                                                "next_phase": state.workflow_state.next_phase
-                                            }
-                                        )
-                    
-                    # Log state transition
-                    planner_supervisor_logger.log_structured(
-                        level="INFO",
-                        message="Pre-model hook: State transformation complete",
-                        extra={
-                            "final_user_request": state.user_request,
-                            "final_task_description": state.task_description,
-                            "final_session_id": state.session_id,
-                            "final_task_id": state.task_id,
-                            "loop_counter": state.workflow_state.loop_counter,
-                            "current_phase": state.workflow_state.current_phase,
-                            "next_phase": state.workflow_state.next_phase,
-                            "requirements_complete": state.workflow_state.requirements_complete
-                        }
-                    )
+                        
+                        # Update the PlannerSupervisorState (same instance used by both supervisor and requirements analyzer)
+                        state.user_request = user_request
+                        state.task_description = task_description
+                        state.session_id = session_id
+                        state.task_id = task_id
+                        
+                        planner_supervisor_logger.log_structured(
+                            level="INFO",
+                            message="Pre-model hook: Updated shared state instance",
+                            extra={
+                                "user_request": user_request,
+                                "task_description": task_description,
+                                "session_id": session_id,
+                                "task_id": task_id
+                            }
+                        )
+                        
+                        # Create llm_input_messages with the extracted user request
+                        llm_input_messages = [HumanMessage(content=user_request)]
+                        state.llm_input_messages = llm_input_messages
+                        self._planner_supervisor_state.session_id = state.session_id
+                        self._planner_supervisor_state.task_id = state.task_id
+                        self._planner_supervisor_state.user_request = state.user_request
+                        self._planner_supervisor_state.task_description = state.task_description
+                        self._planner_supervisor_state.workflow_state.current_phase = state.workflow_state.current_phase
                     
                     return state
                     
@@ -562,8 +670,9 @@ When you receive a request:
                     )
                     return state
             
+            # Create supervisor with the SAME state instance that requirements analyzer uses
             planner_supervisor = create_supervisor(
-                agents=[self.requirements_analyzer, self.dependency_mapper, self.execution_planner],
+                agents=[self.requirements_analyzer, self.security_n_best_practices_evaluator, self.execution_planner],
                 prompt=self.supervisor_prompt,
                 model=self.model,
                 tools=list(self.handoff_tools.values()),

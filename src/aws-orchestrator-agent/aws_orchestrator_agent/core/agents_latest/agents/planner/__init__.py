@@ -12,7 +12,7 @@ The planner sub-supervisor uses langgraph-supervisor to coordinate these agents.
 # Import React agent factory functions
 from .sub_agents import (
     create_requirements_analyzer_react_agent,
-    create_dependency_mapper_react_agent,
+    create_security_n_best_practices_react_agent,
     create_execution_planner_react_agent,
     InfrastructureRequirements,
     AWSServiceMapping,
@@ -31,7 +31,7 @@ from .planner_sub_supervisor import (
 # Import custom handoff tools
 from .planner_handoff_tools import (
     create_handoff_to_requirements_analyzer,
-    create_handoff_to_dependency_mapper,
+    create_handoff_to_security_n_best_practices_evaluator,
     create_handoff_to_execution_planner,
     create_handoff_to_planner_complete,
     create_planner_handoff_tools
@@ -42,7 +42,7 @@ from .planner_supervisor_state import (
     PlannerSupervisorState,
     PlanningWorkflowState,
     RequirementsData,
-    DependencyData,
+    Security_N_Best_Practices_Evaluator_Data,
     ExecutionData,
     PlanningResults,
     create_initial_planner_state,
@@ -58,7 +58,7 @@ __all__ = [
     
     # React agent factory functions
     "create_requirements_analyzer_react_agent",
-    "create_dependency_mapper_react_agent", 
+    "create_security_n_best_practices_react_agent", 
     "create_execution_planner_react_agent",
     
     # React agent schemas
@@ -70,7 +70,7 @@ __all__ = [
     
     # Custom handoff tools
     "create_handoff_to_requirements_analyzer",
-    "create_handoff_to_dependency_mapper",
+    "create_handoff_to_security_n_best_practices_evaluator",
     "create_handoff_to_execution_planner", 
     "create_handoff_to_planner_complete",
     "create_planner_handoff_tools",
@@ -79,7 +79,7 @@ __all__ = [
     "PlannerSupervisorState",
     "PlanningWorkflowState",
     "RequirementsData",
-    "DependencyData",
+    "Security_N_Best_Practices_Evaluator_Data",
     "ExecutionData", 
     "PlanningResults",
     "create_initial_planner_state",

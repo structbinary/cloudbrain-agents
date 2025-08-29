@@ -7,20 +7,28 @@ This module implements the Requirements Analyzer as a React agent with tools:
 """
 
 import json
-from typing import Dict, Any, List, Literal
+from typing import Dict, Any, List, Literal, Optional
 from langchain_core.tools import tool
-from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.messages import SystemMessage, HumanMessage
-from pydantic import BaseModel, Field, model_validator, field_validator
+from pydantic import BaseModel, Field
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import AIMessage
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
 from enum import Enum
-from .requirement_analyser_prompts import AWS_SERVICE_DISCOVERY_SYSTEM_PROMPT, AWS_SERVICE_DISCOVERY_HUMAN_PROMPT
+from aws_orchestrator_agent.core.agents_latest.agents.planner.planner_supervisor_state import PlannerSupervisorState
+from .requirement_analyser_prompts import (
+    AWS_SERVICE_DISCOVERY_SYSTEM_PROMPT,
+    AWS_SERVICE_DISCOVERY_HUMAN_PROMPT,
+    TERRAFORM_ATTRIBUTE_MAPPER_DIRECT_SYSTEM_PROMPT,
+    TERRAFORM_ATTRIBUTE_MAPPER_DIRECT_HUMAN_PROMPT
+)
+from ..planner_utils import create_agent_completion_data
+
+from aws_orchestrator_agent.utils.mcp_client import create_mcp_client
 
 # Create logger
 requirements_logger = AgentLogger("REQUIREMENTS_ANALYZER_REACT")
@@ -33,302 +41,146 @@ _service_discovery_parser = None
 _service_discovery_system_prompt = None
 _service_discovery_human_prompt = None
 _service_discovery_prompt = None
+_mcp_client = None
+_terraform_attribute_mapping_parser = None
+
+# Global variable for shared planner state access
+_shared_planner_state: Optional[PlannerSupervisorState] = None
 
 # Define the output schema for structured extraction
+class ServiceRequirement(BaseModel):
+    """Service-specific requirements and specifications"""
+    service_name: str = Field(description="Name of the AWS service")
+    aws_service_type: str = Field(description="AWS service identifier (e.g., 's3', 'vpc', 'ec2')")
+    business_requirements: Dict[str, str] = Field(description="Business needs specific to this service")
+    technical_specifications: Dict[str, str] = Field(description="Technical specifications native to this service")
+
 class InfrastructureRequirements(BaseModel):
     """Structured representation of AWS infrastructure requirements"""
-    primary_services: List[str] = Field(description="Main AWS services explicitly mentioned")
-    secondary_services: List[str] = Field(description="Supporting/dependent AWS services identified")
     scope_classification: str = Field(description="One of: 'single_service', 'multi_service', 'full_application_stack'")
-    business_requirements: Dict[str, str] = Field(description="Business needs mapped to technical specifications")
-    technical_specifications: Dict[str, Any] = Field(description="Technical details and constraints")
     deployment_context: str = Field(description="Context like development, production, compliance requirements")
+    services: List[ServiceRequirement] = Field(description="List of service-specific requirements")
 
-# Enhanced AWS service category enumeration based on official AWS documentation
-class AWSServiceCategory(str, Enum):
-    COMPUTE = "Compute"
-    CONTAINERS = "Containers" 
-    STORAGE = "Storage"
-    DATABASE = "Database"
-    NETWORKING = "Networking and Content Delivery"
-    SECURITY_IDENTITY = "Security, Identity, and Compliance"
-    MANAGEMENT_GOVERNANCE = "Management and Governance"
-    ANALYTICS = "Analytics"
-    MACHINE_LEARNING = "Machine Learning"
-    APPLICATION_INTEGRATION = "Application Integration"
-    DEVELOPER_TOOLS = "Developer Tools"
-    MIGRATION_TRANSFER = "Migration and Transfer"
-    MEDIA_SERVICES = "Media Services"
-    IOT = "Internet of Things"
-    GAME_TECH = "Game Tech"
-    BLOCKCHAIN = "Blockchain"
-    SERVERLESS = "Serverless"
-    EDGE_COMPUTING = "Edge and Hybrid"
-
-
-# Dependency relationship types based on AWS Config service relationships
+# Dependency types for service dependencies
 class DependencyType(str, Enum):
-    REQUIRED = "required"          # Critical dependency - cannot function without
-    RECOMMENDED = "recommended"    # Best practice dependency
-    OPTIONAL = "optional"         # Enhancement dependency
-    CONDITIONAL = "conditional"   # Depends on specific configuration
-    IMPLICIT = "implicit"         # Automatically created/managed
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+    RECOMMENDED = "recommended"
 
-
-class DependencyNature(str, Enum):
-    CREATION_ORDER = "creation_order"      # Must be created before
-    ACCESS_CONTROL = "access_control"      # Provides permissions/access
-    ENCRYPTION = "encryption"              # Provides encryption services
-    MONITORING = "monitoring"              # Provides observability
-    NETWORKING = "networking"              # Network connectivity/security
-    DATA_FLOW = "data_flow"               # Data processing/storage
-    CONFIGURATION = "configuration"        # Configuration management
-
-
-# Enhanced relationship types for multi-service intelligence
-class ServiceRelationshipType(str, Enum):
-    ENABLES = "enables"                    # VPC enables EKS deployment
-    REQUIRES = "requires"                  # EKS requires VPC
-    ENHANCES = "enhances"                  # CloudWatch enhances EKS observability
-    INTEGRATES_WITH = "integrates_with"    # EKS integrates with ECR
-    DEPENDS_ON = "depends_on"             # Node groups depend on EC2
-    PROVIDES_FOR = "provides_for"         # IAM provides access control for EKS
-
-
-class DependencyLayer(str, Enum):
-    FOUNDATION = "foundation"         # VPC, IAM - foundational services
-    CORE = "core"                    # EKS cluster - core application service
-    INTEGRATION = "integration"      # ECR, ELB - integration services
-    OPERATIONAL = "operational"      # CloudWatch, Systems Manager - ops services
-    SECURITY = "security"           # KMS, GuardDuty - security services
-
-
-# Enhanced service discovery models with validation
-class TerraformResource(BaseModel):
-    """Terraform resource specification with validation"""
-    resource_type: str = Field(..., description="Exact Terraform resource type (e.g., aws_s3_bucket)")
-    purpose: str = Field(..., description="Purpose of this resource in the infrastructure")
-    required: bool = Field(..., description="Whether this resource is required for basic functionality")
-    depends_on: List[str] = Field(default_factory=list, description="List of resource types this depends on")
-    configuration_priority: int = Field(default=1, description="Configuration priority (1=highest, 5=lowest)")
-    
-    @field_validator('resource_type')
-    @classmethod
-    def validate_terraform_resource_type(cls, v):
-        if not v.startswith('aws_'):
-            raise ValueError('Resource type must start with "aws_"')
-        return v
-
-
+# Service dependency specification
 class ServiceDependency(BaseModel):
-    """Enhanced service dependency specification"""
-    service_name: str = Field(..., description="Name of the dependent service")
-    aws_service_type: str = Field(..., description="AWS service identifier")
-    category: AWSServiceCategory = Field(..., description="AWS service category")
-    terraform_resources: List[str] = Field(..., description="List of Terraform resource types")
-    dependency_reason: str = Field(..., description="Detailed explanation of why this dependency exists")
-    dependency_type: DependencyType = Field(..., description="Type of dependency relationship")
-    dependency_nature: DependencyNature = Field(..., description="Nature of the dependency")
-    well_architected_pillar: List[str] = Field(..., description="Which AWS Well-Architected pillars this addresses")
-    configuration_details: Dict[str, Any] = Field(default_factory=dict, description="Specific configuration requirements")
+    """Service dependency as module variable"""
+    service: str = Field(..., description="Dependent service name")
+    variable: str = Field(..., description="Variable name for dependency")
+    type: DependencyType = Field(..., description="Dependency type")
 
+# Architecture pattern for services
+class ArchitecturePattern(BaseModel):
+    """Architecture pattern for the service"""
+    pattern_name: str = Field(..., description="Pattern name")
+    description: str = Field(..., description="Pattern description")
+    best_practices: List[str] = Field(..., description="Best practices for this pattern")
 
-class SecurityRequirement(BaseModel):
-    """Security-specific dependencies and requirements"""
-    service: str = Field(..., description="Security service name")
-    terraform_resources: List[str] = Field(..., description="Required Terraform security resources")
-    purpose: str = Field(..., description="Security purpose (encryption, access control, etc.)")
-    compliance_frameworks: List[str] = Field(default_factory=list, description="Supported compliance frameworks")
-    well_architected_controls: List[str] = Field(..., description="Security controls addressed")
+# Well-Architected Framework alignment
+class WellArchitectedAlignment(BaseModel):
+    """Well-Architected Framework alignment for the service"""
+    operational_excellence: List[str] = Field(default_factory=list)
+    security: List[str] = Field(default_factory=list)
+    reliability: List[str] = Field(default_factory=list)
+    performance_efficiency: List[str] = Field(default_factory=list)
+    cost_optimization: List[str] = Field(default_factory=list)
+    sustainability: List[str] = Field(default_factory=list)
 
+# Cost optimization recommendation
+class CostOptimizationRecommendation(BaseModel):
+    """Cost optimization recommendation for the service"""
+    category: str = Field(..., description="Cost category")
+    recommendation: str = Field(..., description="Specific recommendation")
+    potential_savings: Optional[str] = Field(None, description="Potential cost savings")
+    implementation_difficulty: Literal["low", "medium", "high"] = Field(..., description="Implementation difficulty")
 
-class NetworkingDependency(BaseModel):
-    """Network-specific dependencies"""
-    component: str = Field(..., description="Networking component")
-    terraform_resources: List[str] = Field(..., description="Required networking resources")
-    purpose: str = Field(..., description="Networking purpose")
-    network_tier: Literal["public", "private", "isolated"] = Field(..., description="Network tier placement")
-
-
-class ServiceRelationship(BaseModel):
-    """Service relationship mapping with enhanced details"""
-    source_service: str = Field(..., description="Source service in the relationship")
-    target_services: List[str] = Field(..., description="Target services this depends on")
-    relationship_type: DependencyNature = Field(..., description="Nature of the relationship")
-    creation_order_priority: int = Field(..., description="Order priority for resource creation")
-
-
-# Enhanced service specification with relationships for multi-service intelligence
+# Individual service specification
 class ServiceSpecification(BaseModel):
-    """Enhanced service specification with relationship mapping"""
-    service_name: str = Field(..., description="AWS service name")
-    aws_service_type: str = Field(..., description="AWS service identifier")
-    category: AWSServiceCategory = Field(..., description="AWS service category")
-    dependency_layer: DependencyLayer = Field(..., description="Dependency layer classification")
-    terraform_resources: List[str] = Field(..., description="Complete Terraform resource list")
-    relationship_to_primary: ServiceRelationshipType = Field(..., description="How this service relates to primary services")
-    enables_services: List[str] = Field(default_factory=list, description="Services this enables")
-    requires_services: List[str] = Field(default_factory=list, description="Services this requires")
-    configuration_priority: int = Field(..., description="Configuration order (1=first, 5=last)")
-    production_criticality: Literal["critical", "recommended", "optional"] = Field(..., description="Production deployment criticality")
-    well_architected_pillars: List[str] = Field(default_factory=list, description="AWS Well-Architected pillars addressed")
+    """Complete individual service specification"""
+    service_name: str = Field(..., description="AWS service name (e.g., 'S3', 'EKS', 'ElastiCache')")
+    aws_service_type: str = Field(..., description="AWS service identifier (e.g., 's3', 'eks', 'elasticache')")
+    terraform_resources: List[str] = Field(..., description="List of Terraform resources for production-grade deployment")
+    dependencies: List[ServiceDependency] = Field(default_factory=list, description="Service dependencies as variables")
+    
+    # Architecture and patterns
+    architecture_patterns: List[ArchitecturePattern] = Field(..., description="Architecture patterns for this service")
+    overall_architecture_pattern: Optional[ArchitecturePattern] = Field(None, description="Overall architecture pattern if this is the primary service")
+    
+    # Best practices
+    well_architected_alignment: WellArchitectedAlignment = Field(..., description="Well-Architected Framework alignment")
+    cost_optimization_recommendations: List[CostOptimizationRecommendation] = Field(..., description="Cost optimization recommendations")
+    
+    # Additional metadata
+    description: str = Field(..., description="Service description")
+    production_features: List[str] = Field(..., description="Production features included")
 
-
-class DeploymentPhase(BaseModel):
-    """Deployment sequence phase with detailed rationale"""
-    sequence: int = Field(..., description="Deployment sequence number")
-    services: List[str] = Field(..., description="Services to be deployed in this phase")
-    rationale: str = Field(..., description="Why these services are deployed together in this sequence")
-    layer: DependencyLayer = Field(..., description="Dependency layer for this phase")
-    estimated_duration: str = Field(default="5-10 minutes", description="Estimated deployment time")
-    rollback_strategy: str = Field(default="Terraform destroy in reverse order", description="Rollback approach if deployment fails")
-
-
-# Main output schema with comprehensive validation and multi-service intelligence
+# Main AWS service discovery output
 class AWSServiceMapping(BaseModel):
-    """Production-grade AWS service discovery and dependency mapping with multi-service intelligence"""
-    
-    # Enhanced primary services with full relationship mapping
-    primary_services: List[ServiceSpecification] = Field(
-        ..., description="Primary services with complete relationship mapping and dependencies"
-    )
-    
-    # Foundation services (those that enable primary services)
-    foundation_services: List[ServiceSpecification] = Field(
-        ..., description="Foundation services that enable primary services (VPC, IAM, KMS)"
-    )
-    
-    # Integration services (those that enhance primary services)
-    integration_services: List[ServiceSpecification] = Field(
-        ..., description="Services that integrate with or enhance primary services"
-    )
-    
-    # Operational services (monitoring, management, etc.)
-    operational_services: List[ServiceSpecification] = Field(
-        ..., description="Operational services for monitoring, logging, management"
-    )
-    
-    # Security services (additional security layers)
-    security_services: List[ServiceSpecification] = Field(
-        ..., description="Security services beyond foundation security"
-    )
-    
-    # Legacy field maintained for backward compatibility
-    implicit_dependencies: List[ServiceDependency] = Field(
-        ..., description="Comprehensive implicit/supporting services with detailed analysis"
-    )
-    
-    # Terraform resource mapping
-    terraform_resources: List[TerraformResource] = Field(
-        ..., description="Complete Terraform resource specification with dependencies"
-    )
-    
-    # Enhanced service relationship matrix
-    service_relationships: List[ServiceRelationship] = Field(
-        ..., description="Detailed service dependency relationships with creation order"
-    )
-    
-    # Service relationship matrix for multi-service intelligence
-    service_relationship_matrix: Dict[str, Dict[str, ServiceRelationshipType]] = Field(
-        ..., description="Matrix showing how each service relates to others (enables, requires, integrates_with)"
-    )
-    
-    # Deployment sequence with rationale
-    deployment_sequence: List[DeploymentPhase] = Field(
-        ..., description="Ordered deployment sequence with dependencies and rationale explained"
-    )
-    
-    # Multi-service architecture patterns
-    architecture_patterns: Dict[str, List[str]] = Field(
-        ..., description="Architecture patterns identified (e.g., 'container_platform', 'network_foundation')"
-    )
-    
-    # Categorization
-    category_mapping: Dict[str, AWSServiceCategory] = Field(
-        ..., description="AWS service category classification for each service"
-    )
-    
-    # Security analysis
-    security_dependencies: List[SecurityRequirement] = Field(
-        ..., description="Security-related services with compliance mapping"
-    )
-    
-    # Monitoring and observability
-    monitoring_dependencies: List[Dict[str, Any]] = Field(
-        ..., description="Monitoring, logging, and observability services"
-    )
-    
-    # Network architecture
-    networking_dependencies: List[NetworkingDependency] = Field(
-        ..., description="Network architecture requirements and dependencies"
-    )
-    
-    # Well-Architected Framework alignment
-    well_architected_alignment: Dict[str, List[str]] = Field(
-        ..., description="Mapping to AWS Well-Architected Framework pillars"
-    )
-    
-    # Cost optimization insights
-    cost_optimization_recommendations: List[Dict[str, Any]] = Field(
-        default_factory=list, description="Cost optimization recommendations"
-    )
-    
-    @model_validator(mode='after')
-    def validate_service_mapping_consistency(self):
-        """Ensure consistency across all mapping components"""
-        # Validate primary services
-        all_services = []
-        all_services.extend([svc.aws_service_type for svc in self.primary_services])
-        all_services.extend([svc.aws_service_type for svc in self.foundation_services])
-        all_services.extend([svc.aws_service_type for svc in self.integration_services])
-        all_services.extend([svc.aws_service_type for svc in self.operational_services])
-        all_services.extend([svc.aws_service_type for svc in self.security_services])
-        
-        # Validate that all services have category mappings
-        category_mapping = self.category_mapping
-        for service_type in all_services:
-            if service_type not in category_mapping:
-                raise ValueError(f"Missing category mapping for service: {service_type}")
-        
-        # Validate relationship matrix consistency
-        relationship_matrix = self.service_relationship_matrix
-        for source_service, relationships in relationship_matrix.items():
-            if source_service not in all_services:
-                raise ValueError(f"Service in relationship matrix not found in service lists: {source_service}")
-            for target_service in relationships.keys():
-                if target_service not in all_services:
-                    raise ValueError(f"Target service in relationship matrix not found in service lists: {target_service}")
-        
-        # Validate deployment sequence references valid services
-        for phase in self.deployment_sequence:
-            for service in phase.services:
-                if service not in all_services:
-                    raise ValueError(f"Service in deployment sequence not found in service lists: {service}")
-        
-        return self
-    
-    @model_validator(mode='after') 
-    def validate_no_empty_service_arrays(self):
-        """Ensure no service has empty terraform_resources arrays"""
-        all_service_lists = [
-            self.primary_services,
-            self.foundation_services, 
-            self.integration_services,
-            self.operational_services,
-            self.security_services
-        ]
-        
-        for service_list in all_service_lists:
-            for service in service_list:
-                if not service.terraform_resources:
-                    raise ValueError(f"Service {service.service_name} has empty terraform_resources array")
-        
-        return self
+    """AWS service discovery output - list of individual services"""
+    services: List[ServiceSpecification] = Field(..., description="List of all services with complete specifications")
+
+# Final resource attributes output
+class AttributeType(str, Enum):
+    """Terraform attribute types"""
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+    COMPUTED = "computed"
+    DEPRECATED = "deprecated"
+
+class AttributeCategory(str, Enum):
+    """Attribute categorization for module design"""
+    ARGUMENT = "argument"  # Input parameter
+    REFERENCE = "reference"  # Output that can be referenced by other resources
+    COMPUTED = "computed"  # Read-only calculated value
+    DEPRECATED = "deprecated"  # No longer recommended
+
+class TerraformAttribute(BaseModel):
+    """Enhanced Terraform attribute specification with categorization"""
+    name: str = Field(..., description="Attribute name")
+    type: str = Field(..., description="Terraform data type (string, number, bool, list, map, object, etc.)")
+    required: bool = Field(..., description="Whether this attribute is mandatory")
+    description: str = Field(..., description="Detailed attribute description and purpose")
+    default_value: Optional[Any] = Field(None, description="Default value if any")
+    validation_rules: Optional[List[str]] = Field(None, description="Validation constraints and requirements")
+    example_value: Optional[Any] = Field(None, description="Practical example value")
+    category: AttributeCategory = Field(..., description="Whether this is an argument, reference, computed, or deprecated")
+    is_output: bool = Field(False, description="Whether this attribute can be exposed as module output")
+    is_reference: bool = Field(False, description="Whether this attribute can be referenced by dependent resources")
+    documentation_url: Optional[str] = Field(None, description="Link to Terraform documentation")
+
+class TerraformResourceSpecification(BaseModel):
+    """Enhanced Terraform resource specification with comprehensive attributes"""
+    resource_name: str = Field(..., description="Terraform resource name (e.g., aws_s3_bucket)")
+    provider: str = Field(..., description="Provider name (e.g., aws)")
+    description: str = Field(..., description="Resource description and purpose")
+    required_attributes: List[TerraformAttribute] = Field(..., description="Mandatory attributes")
+    optional_attributes: List[TerraformAttribute] = Field(..., description="Optional attributes")
+    computed_attributes: List[TerraformAttribute] = Field(..., description="Computed/read-only attributes")
+    deprecated_attributes: List[TerraformAttribute] = Field(default_factory=list, description="Deprecated attributes")
+    version_requirements: Optional[str] = Field(None, description="Provider version requirements")
+    resource_url: Optional[str] = Field(None, description="Link to Terraform documentation")
+
+class TerraformServiceAttributeMapping(BaseModel):
+    """Attribute mapping for a single AWS service"""
+    service_name: str = Field(..., description="AWS service name")
+    aws_service_type: str = Field(..., description="AWS service type identifier")
+    description: str = Field(..., description="Service description and purpose")
+    terraform_resources: List[TerraformResourceSpecification] = Field(..., description="Complete resource specifications")
+    version_requirements: Optional[str] = Field(None, description="Provider version requirements")
+
+class TerraformAttributeMapping(BaseModel):
+    """Enhanced attribute mapping supporting multiple services"""
+    services: List[TerraformServiceAttributeMapping] = Field(..., description="List of service attribute mappings")
 
 
 def _initialize_requirements_tools(config: Config):
     """Initialize LLM and parsers for requirements tools."""
-    global _model, _infra_requirements_parser, _requirements_parser_prompt, _service_discovery_parser, _service_discovery_prompt, _service_discovery_system_prompt, _service_discovery_human_prompt
+    global _model, _infra_requirements_parser, _requirements_parser_prompt, _service_discovery_parser, _service_discovery_prompt, _service_discovery_system_prompt, _service_discovery_human_prompt, _mcp_client, _terraform_attribute_mapping_parser
     
     if _model is None:
         llm_config = config.get_llm_config()
@@ -338,9 +190,11 @@ def _initialize_requirements_tools(config: Config):
             temperature=llm_config['temperature'],
             max_tokens=llm_config['max_tokens']
         )
+        _mcp_client = create_mcp_client(host=config.TERRAFORM_MCP_SERVER_HOST, port=config.TERRAFORM_MCP_SERVER_PORT, transport=config.TERRAFORM_MCP_SERVER_TRANSPORT)
         
         _infra_requirements_parser = JsonOutputParser(pydantic_object=InfrastructureRequirements)
         _service_discovery_parser = JsonOutputParser(pydantic_object=AWSServiceMapping)
+        _terraform_attribute_mapping_parser = JsonOutputParser(pydantic_object=TerraformAttributeMapping)
         _service_discovery_system_prompt = AWS_SERVICE_DISCOVERY_SYSTEM_PROMPT
         _service_discovery_human_prompt = AWS_SERVICE_DISCOVERY_HUMAN_PROMPT
         _service_discovery_prompt = ChatPromptTemplate.from_messages([
@@ -354,36 +208,36 @@ You are an expert AWS Infrastructure Requirements Analyst specialized in parsing
 
 Your primary responsibilities:
 1. Extract infrastructure requirements from user queries with precision
-2. Identify primary and secondary AWS services mentioned or implied
+2. Identify ONLY the AWS services explicitly mentioned in the user query
 3. Determine the scope and complexity of the infrastructure request
-4. Map business requirements to specific technical specifications
+4. Map business requirements to service-specific technical specifications
 5. Classify the deployment context and constraints
 
 ANALYSIS FRAMEWORK:
 
 **Step 1: Service Identification**
-- PRIMARY SERVICES: Explicitly mentioned AWS services in the user query
-- SECONDARY SERVICES: Dependent/supporting services required (IAM, KMS, CloudWatch, VPC components, etc.)
-- Use your knowledge of AWS service dependencies and best practices
+- IDENTIFY ONLY EXPLICITLY MENTIONED SERVICES: Extract AWS services that are directly mentioned in the user query
+- DO NOT INFER SECONDARY SERVICES: Do not add supporting services like IAM, KMS, CloudWatch unless explicitly mentioned
+- FOCUS ON PRIMARY SERVICES: Only include services the user specifically asked for
 
 **Step 2: Scope Classification**
 - SINGLE_SERVICE: One main AWS service (e.g., "S3 bucket module")  
-- MULTI_SERVICE: Multiple related services (e.g., "web application with RDS and ALB")
+- MULTI_SERVICE: Multiple related services (e.g., "S3 and VPC module")
 - FULL_APPLICATION_STACK: Complete application infrastructure (e.g., "3-tier web application")
 
-**Step 3: Requirements Mapping**
-- BUSINESS REQUIREMENTS: What the user wants to achieve (storage, compute, networking, etc.)
-- TECHNICAL SPECIFICATIONS: How it should be implemented (encryption, scaling, networking, etc.)
+**Step 3: Service-Specific Requirements Mapping**
+- BUSINESS REQUIREMENTS: What the user wants to achieve with each specific service
+- TECHNICAL SPECIFICATIONS: Service-native capabilities and configurations (no cross-service dependencies)
 - DEPLOYMENT CONTEXT: Environment type, compliance needs, security requirements
 
-**Step 4: Inference and Best Practices**
-- Identify implied services based on AWS best practices
-- Consider security, monitoring, and compliance requirements
-- Think about resource dependencies and deployment order
+**Step 4: Service-Native Focus**
+- Focus on capabilities native to each service
+- Do not include cross-service integrations or dependencies
+- Keep technical specifications within the scope of the specific service
 
 **Output Format:**
 Provide your analysis in the structured JSON format specified by the schema.
-Be thorough but concise. If information is not explicitly provided, use AWS best practices to make reasonable inferences.
+Be thorough but concise. Focus only on explicitly mentioned services and their native capabilities.
 
 **CRITICAL: Return ONLY the JSON object without any markdown formatting, code blocks, or additional text.**
 - DO NOT wrap the response in ```json or ``` blocks
@@ -398,21 +252,29 @@ USER QUERY: {user_query}
 
 Please provide a comprehensive analysis following the framework above. Consider:
 - What AWS services are explicitly mentioned?
-- What supporting services would be needed?
 - What's the scope and complexity?
-- What business goals are implied?
-- What technical specifications can be inferred?
+- What business goals are implied for each service?
+- What service-native technical specifications can be inferred?
 - What deployment context clues are present?
 
 Your final output MUST be a JSON object matching this Pydantic model: `InfrastructureRequirements`:
 
+class ServiceRequirement(BaseModel):
+    service_name: str = Field(description="Name of the AWS service")
+    aws_service_type: str = Field(description="AWS service identifier (e.g., 's3', 'vpc', 'ec2')")
+    business_requirements: Dict[str, str] = Field(description="Business needs specific to this service")
+    technical_specifications: Dict[str, str] = Field(description="Technical specifications native to this service")
+
 class InfrastructureRequirements(BaseModel):
-    primary_services: List[str] = Field(description="Main AWS services explicitly mentioned")
-    secondary_services: List[str] = Field(description="Supporting/dependent AWS services identified")
     scope_classification: str = Field(description="One of: 'single_service', 'multi_service', 'full_application_stack'")
-    business_requirements: Dict[str, str] = Field(description="Business needs mapped to technical specifications")
-    technical_specifications: Dict[str, Any] = Field(description="Technical details and constraints")
     deployment_context: str = Field(description="Context like development, production, compliance requirements")
+    services: List[ServiceRequirement] = Field(description="List of service-specific requirements")
+
+**IMPORTANT GUIDELINES:**
+- Only include services explicitly mentioned in the user query
+- Do not add secondary or supporting services
+- Keep technical specifications native to each service
+- Do not include cross-service dependencies or integrations
 
 """)
 ])
@@ -427,6 +289,7 @@ async def infra_requirements_parser_tool(user_query: str) -> InfrastructureRequi
     - Determines scope (single service, multi-service, full application stack)  
     - Maps business requirements to technical specifications
     - Provides structured output for downstream processing
+    - UPDATES SHARED STATE when analysis completes
     
     Args:
         user_query: Natural language description of infrastructure needs
@@ -435,15 +298,27 @@ async def infra_requirements_parser_tool(user_query: str) -> InfrastructureRequi
         InfrastructureRequirements: Structured analysis of the request
     """
     try:
-        if _model is None:
-            raise ValueError("Requirements tools not initialized. Call _initialize_requirements_tools first.")
+        # ACCESS SHARED STATE
+        global _shared_planner_state
+        if _shared_planner_state is None:
+            raise ValueError("Shared planner state not initialized")
+        
         requirements_logger.log_structured(
             level="INFO",
-            message="Starting async Infra requirements parser tool",
-            extra={"user_request": user_query[:100] + "..." if len(user_query) > 100 else user_query}
+            message="Starting async Infra requirements parser tool with state access",
+            extra={
+                "user_request": user_query[:100] + "..." if len(user_query) > 100 else user_query,
+                "current_phase": getattr(_shared_planner_state.workflow_state, 'current_phase', 'unknown'),
+                "requirements_complete": getattr(_shared_planner_state.workflow_state, 'requirements_complete', False)
+            }
         )
+        
+        if _model is None:
+            raise ValueError("Requirements tools not initialized. Call _initialize_requirements_tools first.")
+        
         formatted_prompt = _requirements_parser_prompt.format(user_query=user_query)
         llm_response = await _model.ainvoke(formatted_prompt)
+        
         if isinstance(llm_response, AIMessage):
             response = llm_response.content
         else:
@@ -463,6 +338,30 @@ async def infra_requirements_parser_tool(user_query: str) -> InfrastructureRequi
         content = response.strip()
         
         parsed_response = _infra_requirements_parser.parse(content)
+        
+        # Debug the parsed response
+        requirements_logger.log_structured(
+            level="DEBUG",
+            message="Parsed response before state update",
+            extra={
+                "parsed_response_type": type(parsed_response).__name__,
+                "parsed_response_keys": list(parsed_response.keys()) if isinstance(parsed_response, dict) else "not_dict",
+                "has_scope_classification": hasattr(parsed_response, 'scope_classification') if not isinstance(parsed_response, dict) else 'is_dict',
+                "scope_classification": parsed_response.get('scope_classification', 'not_found') if isinstance(parsed_response, dict) else getattr(parsed_response, 'scope_classification', 'not_found')
+            }
+        )
+        requirements_logger.log_structured(
+            level="INFO",
+            message="Infra requirements parser tool completed and state updated",
+            extra={
+                "parsed_services_count": len(parsed_response.services) if hasattr(parsed_response, 'services') else 0,
+                "scope_classification": getattr(parsed_response, 'scope_classification', 'unknown'),
+                "state_updated": True
+            }
+        )
+
+        _shared_planner_state.requirements_data.analysis_results = parsed_response
+        _shared_planner_state.requirements_data.analysis_complete = True
         return parsed_response
 
     except Exception as e:
@@ -476,35 +375,43 @@ async def infra_requirements_parser_tool(user_query: str) -> InfrastructureRequi
 @tool
 async def aws_service_discovery_tool(requirements_analysis: str) -> AWSServiceMapping:
     """
-    Production-grade AWS service discovery tool with comprehensive dependency mapping.
+    Service-focused AWS service discovery tool for Terraform module generation.
     
     This tool provides:
-    - Complete AWS service ecosystem mapping with all dependencies
-    - Production-ready Terraform resource specifications with proper ordering
-    - Security-first approach with comprehensive security dependencies
-    - Well-Architected Framework alignment and compliance mapping
-    - Cost optimization recommendations and best practices integration
-    - Network architecture planning with proper segmentation
-    - Comprehensive monitoring and observability stack recommendations
+    - Individual service specifications with production-grade Terraform resources
+    - Service dependencies mapped as module variables (not resources)
+    - Architecture patterns and best practices for each service
+    - Well-Architected Framework alignment per service
+    - Cost optimization recommendations per service
+    - Production features and security configurations per service
     
     Args:
         requirements_analysis: Structured requirements from the Requirements Parser Tool
         
     Returns:
-        AWSServiceMapping: Comprehensive service discovery with validation and dependencies
+        AWSServiceMapping: Service-focused specifications suitable for Terraform module generation
         
     Raises:
         ValidationError: If output doesn't meet production quality standards
     """
     try:
-        if _model is None:
-            raise ValueError("Requirements tools not initialized. Call _initialize_requirements_tools first.")
+        # ACCESS SHARED STATE
+        global _shared_planner_state
+        if _shared_planner_state is None:
+            raise ValueError("Shared planner state not initialized")
         
         requirements_logger.log_structured(
             level="INFO",
-            message="Starting async AWS service discovery",
-            extra={"requirements_analysis_length": len(requirements_analysis)}
+            message="Starting async AWS service discovery with state access",
+            extra={
+                "requirements_analysis_length": len(requirements_analysis),
+                "current_phase": getattr(_shared_planner_state.workflow_state, 'current_phase', 'unknown'),
+                "requirements_complete": getattr(_shared_planner_state.workflow_state, 'requirements_complete', False)
+            }
         )
+        
+        if _model is None:
+            raise ValueError("Requirements tools not initialized. Call _initialize_requirements_tools first.")
         
         # Debug the input and prompt template
         requirements_logger.log_structured(
@@ -571,21 +478,25 @@ async def aws_service_discovery_tool(requirements_analysis: str) -> AWSServiceMa
         
         # Parse the response using the service discovery parser
         parsed_response = _service_discovery_parser.parse(content)
-        
-        # CRITICAL: Set completion flag after successful parsing
-        # Note: In React agent context, we can't directly modify state here
-        # The completion flag will be set by the supervisor when this tool completes successfully
-        
+
+        # CRITICAL: Log successful completion with detailed information
         requirements_logger.log_structured(
             level="INFO",
-            message="AWS service discovery completed successfully",
+            message="AWS service discovery completed successfully with valid JSON mapping",
             extra={
                 "completion_ready": True,
                 "services_discovered": len(parsed_response.get('primary_services', [])),
-                "workflow_phase": "requirements_analysis"
+                "foundation_services_count": len(parsed_response.get('foundation_services', [])),
+                "terraform_resources_count": len(parsed_response.get('terraform_resources', [])),
+                "deployment_sequence_count": len(parsed_response.get('deployment_sequence', [])),
+                "workflow_phase": "requirements_analysis",
+                "has_required_fields": True,
+                "json_structure_valid": True
             }
         )
         
+        _shared_planner_state.requirements_data.aws_service_mapping = parsed_response
+        _shared_planner_state.requirements_data.aws_service_mapping_complete = True
         return parsed_response
         
     except Exception as e:
@@ -596,11 +507,166 @@ async def aws_service_discovery_tool(requirements_analysis: str) -> AWSServiceMa
         )
         return json.dumps({"error": f"Requirements validation failed: {str(e)}"})
 
-def create_requirements_analyzer_react_agent(config: Config):
+@tool
+async def get_final_resource_attributes_tool(aws_service_mapping: str) -> TerraformAttributeMapping: 
+    """
+    Get the final resource attributes for the service via React agent.
+    
+    This tool:
+    - Parses AWS service mapping to identify Terraform resources
+    - Uses React agent to generate comprehensive attribute specifications
+    - Analyzes and categorizes all attributes (required/optional/computed/deprecated)
+    - Provides production-grade attribute recommendations and best practices
+    - Returns comprehensive attribute mapping with detailed specifications
+
+    Args:
+        aws_service_mapping: Structured AWS Service Mapping from the AWS Service Discovery Tool
+        
+    Returns:
+        TerraformAttributeMapping: Complete attribute specifications for all resources including:
+            - services: List of service attribute mappings
+            - Each service includes terraform_resources with categorized attributes
+    """
+    try:
+        # Log the input received
+        requirements_logger.log_structured(
+            level="INFO",
+            message="=== GET_FINAL_RESOURCE_ATTRIBUTES_TOOL STARTED (REACT AGENT) ===",
+            extra={
+                "input_type": type(aws_service_mapping).__name__,
+                "input_length": len(aws_service_mapping) if aws_service_mapping else 0,
+                "input_preview": aws_service_mapping[:200] + "..." if aws_service_mapping and len(aws_service_mapping) > 200 else aws_service_mapping,
+                "tool_name": "get_final_resource_attributes_tool",
+                "approach": "react_agent_no_tools"
+            }
+        )
+        global _model, _terraform_attribute_mapping_parser
+        
+        if _model is None:
+            raise ValueError("Requirements tools not initialized. Call _initialize_requirements_tools first.")
+        
+        # Parse the AWS service mapping
+        if isinstance(aws_service_mapping, str):
+            aws_service_mapping = json.loads(aws_service_mapping)
+        
+        # Pre-format the prompt with the actual data
+        escaped_mapping = json.dumps(aws_service_mapping, indent=2).replace("{", "{{").replace("}", "}}")
+        formatted_system_prompt = TERRAFORM_ATTRIBUTE_MAPPER_DIRECT_SYSTEM_PROMPT
+        formatted_human_prompt = TERRAFORM_ATTRIBUTE_MAPPER_DIRECT_HUMAN_PROMPT.replace("{aws_service_mapping}", escaped_mapping)
+        
+        # Create the prompt template for React agent
+        attribute_prompt_template = ChatPromptTemplate.from_messages([
+            ("system", formatted_system_prompt),
+            ("human", formatted_human_prompt)
+        ])
+        
+        requirements_logger.log_structured(
+            level="DEBUG",
+            message="React agent prompt template created successfully",
+            extra={
+                "prompt_type": type(attribute_prompt_template).__name__,
+                "has_system_message": True,
+                "has_human_message": True
+            }
+        )
+        
+        # Create React agent without tools
+        attribute_agent = create_react_agent(
+            model=_model,
+            tools=[],  # No tools needed - pure reasoning
+            name="attribute_agent",
+            prompt=attribute_prompt_template
+        )
+        
+        requirements_logger.log_structured(
+            level="DEBUG",
+            message="React agent created successfully, invoking with AWS service mapping",
+            extra={
+                "agent_type": type(attribute_agent).__name__,
+                "tools_count": 0,
+                "has_response_format": True
+            }
+        )
+        
+        # Invoke the React agent
+        result = await attribute_agent.ainvoke({
+            "aws_service_mapping": aws_service_mapping
+        })
+        
+        requirements_logger.log_structured(
+            level="INFO",
+            message="React agent completed successfully",
+            extra={
+                "result_type": type(result).__name__,
+                "result_has_content": hasattr(result, 'content') if hasattr(result, '__dict__') else False,
+                "result_length": len(str(result)) if result else 0,
+                "approach": "react_agent_no_tools"
+            }
+        )
+        
+        # Extract the result
+        response = result['messages'][-1]
+        if isinstance(response, AIMessage):
+            content = response.content
+            content_str = str(content) if not isinstance(content, str) else content
+        else:
+            content_str = str(response) if not isinstance(response, str) else response
+        
+        # Parse the result using the TerraformAttributeMapping parser
+        parsed_result = _terraform_attribute_mapping_parser.parse(content_str)
+        
+        # Add unified completion tracking to the parsed result
+        completion_data = create_agent_completion_data(
+            agent_name="requirements_analyzer",
+            task_type="terraform_attribute_mapping",
+            data_type="terraform_attribute_mapping",
+            status="completed"
+        )
+        
+        if isinstance(parsed_result, dict):
+            parsed_result['agent_completion'] = completion_data
+        else:
+            # If it's a Pydantic model, convert to dict and add flag
+            parsed_result_dict = parsed_result.dict() if hasattr(parsed_result, 'dict') else parsed_result
+            parsed_result_dict['agent_completion'] = completion_data
+            parsed_result = parsed_result_dict
+        
+        # Update shared state
+        _shared_planner_state.requirements_data.terraform_attribute_mapping = parsed_result
+        _shared_planner_state.requirements_data.terraform_attribute_mapping_complete = True
+        
+        # Log successful completion
+        requirements_logger.log_structured(
+            level="INFO",
+            message="Terraform attribute mapping completed successfully (React Agent)",
+            extra={
+                "completion_ready": True,
+                "services_count": len(parsed_result.get('services', [])),
+                "total_resources": sum(len(service.get('terraform_resources', [])) for service in parsed_result.get('services', [])),
+                "workflow_phase": "attribute_mapping",
+                "has_required_fields": True,
+                "json_structure_valid": True,
+                "approach": "react_agent_no_tools"
+            }
+        )
+        
+        return parsed_result
+            
+    except Exception as e:
+        requirements_logger.log_structured(
+            level="ERROR",
+            message=f"Terraform attribute mapping failed (React Agent): {e}",
+            extra={"error": str(e), "error_type": type(e).__name__, "approach": "react_agent_no_tools"}
+        )
+        return json.dumps({"error": f"Terraform attribute mapping failed: {str(e)}"})
+
+
+def create_requirements_analyzer_react_agent(state: PlannerSupervisorState, config: Config):
     """
     Create a React agent for requirements analysis.
     
     Args:
+        state: Shared PlannerSupervisorState instance
         config: Configuration instance
         
     Returns:
@@ -613,10 +679,28 @@ def create_requirements_analyzer_react_agent(config: Config):
             extra={"config_type": type(config).__name__}
         )
         
-        # Initialize tools
+        # STORE STATE PARAMETER GLOBALLY FOR TOOLS TO ACCESS
+        global _shared_planner_state
+        _shared_planner_state = state
+        
         requirements_logger.log_structured(
             level="DEBUG",
-            message="Initializing requirements tools",
+            message="State parameter stored globally",
+            extra={
+                "state_type": type(state).__name__,
+                "has_workflow_state": hasattr(state, 'workflow_state'),
+                "current_phase": getattr(state.workflow_state, 'current_phase', 'unknown'),
+                "user_request": getattr(state, 'user_request', ''),
+                "task_description": getattr(state, 'task_description', ''),
+                "session_id": getattr(state, 'session_id', None),
+                "task_id": getattr(state, 'task_id', None)
+            }
+        )
+        
+        # Initialize tools (now with access to shared state)
+        requirements_logger.log_structured(
+            level="DEBUG",
+            message="Initializing requirements tools with state access",
             extra={}
         )
         
@@ -648,45 +732,53 @@ def create_requirements_analyzer_react_agent(config: Config):
             level="DEBUG",
             message="Creating React agent with async tools",
             extra={
-                "tools_count": 2,
-                "tool_names": ["analyze_requirements_tool", "validate_requirements_tool"]
+                "tools_count": 3,
+                "tool_names": ["infra_requirements_parser_tool", "aws_service_discovery_tool", "get_final_resource_attributes_tool"]
             }
         )
         
         requirements_analyzer = create_react_agent(
             model=llm,
-            tools=[infra_requirements_parser_tool, aws_service_discovery_tool],
+            tools=[infra_requirements_parser_tool, aws_service_discovery_tool, get_final_resource_attributes_tool],
             name="requirements_analyzer",
             prompt=ChatPromptTemplate.from_messages([
                 ("system", """
-You are an expert AWS Infrastructure Requirements Analyst. Your role is to analyze user requests and extract comprehensive infrastructure requirements.
+You are an expert AWS Infrastructure Requirements Analyst specializing in comprehensive infrastructure assessment and service mapping.
 
-[ROLE]
-- Analyze user requests for AWS infrastructure needs
-- Extract business and technical requirements
-- Identify constraints, assumptions, and risk factors
-- Define scalability and performance requirements
+## CORE MISSION
+Extract comprehensive infrastructure requirements from user requests and generate complete AWS service mappings for infrastructure deployment.
 
-[COMPLETION REQUIREMENTS]
-- ALWAYS use both tools: infra_requirements_parser_tool THEN aws_service_discovery_tool
-- After aws_service_discovery_tool completes successfully, provide final summary
-- DO NOT continue if either tool fails - report the failure clearly
-- Provide clear completion status in your final response
+## CRITICAL OUTPUT REQUIREMENT
+After completing all three tools successfully, return ONLY the JSON output from get_final_resource_attributes_tool. Do not add any explanations, summaries, or additional text. Return the raw JSON object exactly as it was returned by the tool.
 
-[WORKFLOW - CRITICAL]
-1. Use infra_requirements_parser_tool with the user's request
-2. Use aws_service_discovery_tool with the results from step 1
-3. Verify both tools completed successfully
-4. Provide comprehensive summary and mark analysis complete
+## WORKFLOW (MANDATORY SEQUENCE)
+1. **ANALYZE**: Use infra_requirements_parser_tool with the user's request along with the state of the planning workflow
+2. **MAP SERVICES**: Use aws_service_discovery_tool with parsed requirements  
+3. **GET ATTRIBUTES**: Use get_final_resource_attributes_tool with AWS service mapping to get complete Terraform resource attributes
+4. **VALIDATE**: Ensure all three tools return complete, valid outputs
+5. **RESPOND**: Return the Terraform attribute mapping JSON directly from get_final_resource_attributes_tool
 
-[IMPORTANT INSTRUCTIONS]
-- NEVER ask the user for more information directly - use the tools first
-- ALWAYS use infra_requirements_parser_tool to analyze the request
-- If the user request is empty, unclear, or lacks detail, still use the tool
-- Extract what requirements you can from the available information
-- Make reasonable assumptions based on common infrastructure patterns
-- If critical information is missing, note it in the analysis but don't stop the workflow
-- Always provide a structured analysis even with limited information
+## TOOL EXECUTION RULES
+- infra_requirements_parser_tool: Extracts business/technical requirements from ANY input
+- aws_service_discovery_tool: Generates AWS service mapping JSON (services, terraform_resources, dependencies, etc.)
+- get_final_resource_attributes_tool: Gets complete Terraform resource attribute specifications via MCP server
+- ALL THREE tools are MANDATORY regardless of input quality
+- Execute tools sequentially, never skip any of them
+- If any tool fails, report the specific failure and STOP
+
+## INPUT HANDLING STRATEGY
+**Complete Requests**: Use exact user input with infra_requirements_parser_tool
+**Incomplete Requests**: Still use infra_requirements_parser_tool with available information
+**Empty/Unclear Requests**: Use "AWS infrastructure deployment" as input
+**Always proceed with tool execution first - never ask for clarification before using tools**
+
+## SUCCESS VALIDATION CHECKLIST
+✓ infra_requirements_parser_tool completed successfully
+✓ aws_service_discovery_tool completed successfully  
+✓ get_final_resource_attributes_tool completed successfully
+✓ AWS service mapping JSON contains: services, terraform_resources, dependencies, etc.
+✓ Terraform attribute mapping JSON contains: terraform_resources, mapping_summary, total_attributes, etc.
+✓ No malformed or incomplete JSON output
 
 [HANDLING INCOMPLETE REQUESTS]
 - For empty requests: Use infra_requirements_parser_tool with "AWS infrastructure deployment"
@@ -694,25 +786,23 @@ You are an expert AWS Infrastructure Requirements Analyst. Your role is to analy
 - For partial requests: Use infra_requirements_parser_tool to extract what you can
 - Always use the tools before making any assumptions
 
-[TOOL USAGE]
-- First tool call: infra_requirements_parser_tool with the user's request
-- Second tool call: aws_service_discovery_tool with the results from first tool
-- Then provide a summary based on the tool outputs
+## ERROR HANDLING
+- Tool failure → Report specific error and terminate analysis
+- Invalid JSON → Report JSON validation failure and terminate  
+- Missing required fields → Report incomplete mapping and terminate
+- Only proceed to final response when ALL validations pass
 
-[COMPLETION DETECTION]
-- Only mark complete when AWS service mapping is successfully generated
-- If any tool fails, do not set completion flag
-- Always provide clear completion status in final response
+## IMPORTANT NOTES
+- Make reasonable infrastructure assumptions when information is limited
+- Use AWS best practices for service selection and architecture patterns
+- Focus on production-ready, scalable solutions
+- Maintain security and compliance considerations throughout analysis
 
-[OUTPUT]
-Provide a clear, structured response that includes:
-- Summary of business and technical requirements (from tool output)
-- Key constraints and assumptions (from tool output)
-- Risk factors and mitigation strategies (from tool output)
-- Scalability and performance considerations (from tool output)
-- Any missing information that should be clarified
-- Clear completion status: "Requirements analysis completed successfully"
-            """),
+## FINAL OUTPUT REQUIREMENT
+After successfully completing all three tools, return ONLY the JSON output from get_final_resource_attributes_tool. Do not add any explanations, summaries, or additional text. Return the raw JSON object exactly as it was returned by the tool.
+
+CRITICAL: Return ONLY the JSON object, no additional text or formatting.
+        """),
                 MessagesPlaceholder(variable_name="messages")
             ])
         )
@@ -724,7 +814,10 @@ Provide a clear, structured response that includes:
                 "agent_type": type(requirements_analyzer).__name__,
                 "llm_provider": llm_config['provider'],
                 "llm_model": llm_config['model'],
-                "tools_count": 2
+                "tools_count": 3,
+                "enhanced_prompt": True,
+                "json_output_required": True,
+                "required_workflow": "infra_requirements_parser_tool -> aws_service_discovery_tool -> get_final_resource_attributes_tool -> JSON output"
             }
         )
         
