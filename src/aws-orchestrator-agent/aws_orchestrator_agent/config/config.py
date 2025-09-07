@@ -79,7 +79,7 @@ class Config:
 
     @property
     def llm_config(self) -> Dict[str, Any]:
-        """Get the LLM configuration."""
+        """Get the standard LLM configuration."""
         return {
             'provider': self._config.get('LLM_PROVIDER') or os.getenv('LLM_PROVIDER') or 'openai',
             'model': self._config.get('LLM_MODEL') or os.getenv('LLM_MODEL') or 'gpt-4o-mini',
@@ -87,19 +87,38 @@ class Config:
             'max_tokens': self._config.get('LLM_MAX_TOKENS') or int(os.getenv('LLM_MAX_TOKENS', '1000'))
         }
 
+    @property
+    def llm_higher_config(self) -> Dict[str, Any]:
+        """Get the higher-tier LLM configuration."""
+        return {
+            'provider': self._config.get('LLM_HIGHER_PROVIDER') or os.getenv('LLM_HIGHER_PROVIDER') or 'openai',
+            'model': self._config.get('LLM_HIGHER_MODEL') or os.getenv('LLM_HIGHER_MODEL') or 'gpt-5',
+            'temperature': self._config.get('LLM_HIGHER_TEMPERATURE') or float(os.getenv('LLM_HIGHER_TEMPERATURE', '1.0')),
+            'max_tokens': self._config.get('LLM_HIGHER_MAX_TOKENS') or int(os.getenv('LLM_HIGHER_MAX_TOKENS', '12000'))
+        }
+
     def get_llm_config(self) -> Dict[str, Any]:
-        """Get LLM configuration.
+        """Get standard LLM configuration.
         
         Returns:
-            LLM configuration dictionary
+            Standard LLM configuration dictionary
         """
         return self.llm_config
 
+    def get_llm_higher_config(self) -> Dict[str, Any]:
+        """Get higher-tier LLM configuration.
+        
+        Returns:
+            Higher-tier LLM configuration dictionary
+        """
+        return self.llm_higher_config
+
+
     def set_llm_config(self, config: Dict[str, Any]) -> None:
-        """Set the LLM configuration.
+        """Set the standard LLM configuration.
         
         Args:
-            config: LLM configuration dictionary
+            config: Standard LLM configuration dictionary
         """
         for key, value in config.items():
             if key == 'provider':
@@ -110,6 +129,22 @@ class Config:
                 self._config['LLM_TEMPERATURE'] = value
             elif key == 'max_tokens':
                 self._config['LLM_MAX_TOKENS'] = value
+
+    def set_llm_higher_config(self, config: Dict[str, Any]) -> None:
+        """Set the higher-tier LLM configuration.
+        
+        Args:
+            config: Higher-tier LLM configuration dictionary
+        """
+        for key, value in config.items():
+            if key == 'provider':
+                self._config['LLM_HIGHER_PROVIDER'] = value
+            elif key == 'model':
+                self._config['LLM_HIGHER_MODEL'] = value
+            elif key == 'temperature':
+                self._config['LLM_HIGHER_TEMPERATURE'] = value
+            elif key == 'max_tokens':
+                self._config['LLM_HIGHER_MAX_TOKENS'] = value
 
     @staticmethod
     def convert_env_value(key: str, env_value: str, type_hint: Type) -> Any:

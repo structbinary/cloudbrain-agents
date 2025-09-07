@@ -65,21 +65,14 @@ def create_handoff_to_requirements_analyzer() -> BaseTool:
         description="Transfer control to the Requirements Analyzer agent to analyze user requirements and extract infrastructure needs."
     )
 
-# def create_handoff_to_tf_security_n_best_practices_evaluator() -> BaseTool:
-#     """Create handoff tool for tf_security_n_best_practices_evaluator agent."""
-#     return create_custom_handoff_tool(
-#         agent_name="tf_security_n_best_practices_evaluator",
-#         name="handoff_to_tf_security_n_best_practices_evaluator",
-#         description="Transfer control to the tf_security_n_best_practices_evaluator agent to evaluate security and best practices of the AWS service."
-#     )
 
-def create_handoff_to_security_n_best_practices_evaluator() -> BaseTool:
-    """Create handoff tool for security_n_best_practices_evaluator agent."""
-    return create_custom_handoff_tool(
-        agent_name="security_n_best_practices_evaluator",
-        name="handoff_to_security_n_best_practices_evaluator",
-        description="Transfer control to the security_n_best_practices_evaluator to analyze security compliance and best practices for AWS infrastructure."
-    )
+# def create_handoff_to_security_n_best_practices_evaluator() -> BaseTool:
+#     """Create handoff tool for security_n_best_practices_evaluator agent."""
+#     return create_custom_handoff_tool(
+#         agent_name="security_n_best_practices_evaluator",
+#         name="handoff_to_security_n_best_practices_evaluator",
+#         description="Transfer control to the security_n_best_practices_evaluator to analyze security compliance and best practices for AWS infrastructure."
+#     )
 
 def create_handoff_to_execution_planner() -> BaseTool:
     """Create handoff tool for Execution Planner agent."""
@@ -140,7 +133,7 @@ def create_planner_handoff_tools() -> Dict[str, BaseTool]:
     return {
         "handoff_to_requirements_analyzer": create_handoff_to_requirements_analyzer(),
         # "handoff_to_tf_security_n_best_practices_evaluator": create_handoff_to_tf_security_n_best_practices_evaluator(),
-        "handoff_to_security_n_best_practices_evaluator": create_handoff_to_security_n_best_practices_evaluator(),
+        # "handoff_to_security_n_best_practices_evaluator": create_handoff_to_security_n_best_practices_evaluator(),
         "handoff_to_execution_planner": create_handoff_to_execution_planner(),
         "handoff_to_planner_complete": create_handoff_to_planner_complete(),
     }

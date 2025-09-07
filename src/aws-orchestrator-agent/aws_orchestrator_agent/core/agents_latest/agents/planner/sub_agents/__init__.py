@@ -15,7 +15,6 @@ from .execution_planner_react_agent import create_execution_planner_react_agent
 # Tool Schemas (for reference)
 from .requirements_analyzer_react_agent import InfrastructureRequirements, AWSServiceMapping
 from .security_n_best_practices_react_agent import DependencyMapping
-from .execution_planner_react_agent import ExecutionPlan, RiskAssessment
 
 __all__ = [
     # React Agent Factory Functions
@@ -27,6 +26,4 @@ __all__ = [
     "InfrastructureRequirements",
     "AWSServiceMapping",
     "DependencyMapping",
-    "ExecutionPlan",
-    "RiskAssessment",
 ]

@@ -32,7 +32,7 @@ class PlanningWorkflowState(BaseModel):
         """Check if all phases are complete."""
         return all([
             self.requirements_complete,
-            self.security_n_best_practices_evaluator_complete,
+            #self.security_n_best_practices_evaluator_complete,
             self.execution_complete
         ])
     
@@ -41,8 +41,8 @@ class PlanningWorkflowState(BaseModel):
         """Determine the next phase based on completion status."""
         if not self.requirements_complete:
             return "requirements_analysis"
-        elif not self.security_n_best_practices_evaluator_complete:
-            return "security_n_best_practices_evaluator"
+        # elif not self.security_n_best_practices_evaluator_complete:
+        #     return "security_n_best_practices_evaluator"
         elif not self.execution_complete:
             return "execution_planning"
         else:
@@ -59,8 +59,8 @@ class PlanningWorkflowState(BaseModel):
         """Mark a specific phase as complete."""
         if phase == "requirements_analysis":
             self.requirements_complete = True
-        elif phase == "security_n_best_practices_evaluator":
-            self.security_n_best_practices_evaluator_complete = True
+        # elif phase == "security_n_best_practices_evaluator":
+        #     self.security_n_best_practices_evaluator_complete = True
         elif phase == "execution_planning":
             self.execution_complete = True
         
@@ -95,17 +95,16 @@ class Security_N_Best_Practices_Evaluator_Data(BaseModel):
 
 class ExecutionData(BaseModel):
     """Data from Execution Planner agent."""
-    execution_steps: List[Dict[str, Any]] = Field(default_factory=list, description="Execution steps")
-    total_estimated_time: str = Field(default="", description="Total estimated time")
-    critical_path: List[int] = Field(default_factory=list, description="Critical path steps")
-    resource_requirements: Dict[str, Any] = Field(default_factory=dict, description="Resource requirements")
-    deployment_strategy: str = Field(default="", description="Deployment strategy")
-    testing_phases: List[str] = Field(default_factory=list, description="Testing phases")
-    rollback_plan: Dict[str, Any] = Field(default_factory=dict, description="Rollback plan")
-    success_criteria: List[str] = Field(default_factory=list, description="Success criteria")
-    risk_assessment: Optional[Dict[str, Any]] = Field(default=None, description="Risk assessment")
-    complexity_score: Optional[int] = Field(default=None, description="Complexity score (1-10)")
-    validation_result: Optional[Dict[str, Any]] = Field(default=None, description="Validation results")
+    module_structure_plan: Optional[Dict[str, Any]] = Field(default=None, description="Module structure plan")
+    module_structure_plan_complete: bool = Field(default=False, description="Whether module structure plan is complete")
+    configuration_optimizer_data: Optional[Dict[str, Any]] = Field(default=None, description="Configuration optimizer data")
+    configuration_optimizer_complete: bool = Field(default=False, description="Whether configuration optimizer is complete")
+    state_management_data: Optional[Dict[str, Any]] = Field(default=None, description="State management data")
+    state_management_complete: bool = Field(default=False, description="Whether state management is complete")
+    execution_plan_data: Optional[Dict[str, Any]] = Field(default=None, description="Execution plan data")
+    execution_plan_complete: bool = Field(default=False, description="Whether execution plan is complete")
+    agent_completion: Optional[Dict[str, Any]] = Field(default=None, description="Agent completion data")
+    timestamp: Optional[str] = Field(default=None, description="Timestamp when execution planning was completed")
 
 class PlanningResults(BaseModel):
     """Complete planning results from all phases."""

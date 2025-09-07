@@ -34,7 +34,7 @@ from .planner_supervisor_state import (
 from .planner_handoff_tools import create_planner_handoff_tools
 from .sub_agents import (
     create_requirements_analyzer_react_agent,
-    create_security_n_best_practices_react_agent,
+    #create_security_n_best_practices_react_agent,
     create_execution_planner_react_agent
 )
 
@@ -228,21 +228,21 @@ class PlannerSubSupervisorAgent(BaseSubgraphAgent):
                 }
             )
             
-            planner_supervisor_logger.log_structured(
-                level="DEBUG",
-                message="Creating dependency mapper",
-                extra={}
-            )
+            # planner_supervisor_logger.log_structured(
+            #     level="DEBUG",
+            #     message="Creating dependency mapper",
+            #     extra={}
+            # )
             
-            self.security_n_best_practices_evaluator = create_security_n_best_practices_react_agent(state=self._planner_supervisor_state, config=self.config_instance)
+            # self.security_n_best_practices_evaluator = create_security_n_best_practices_react_agent(state=self._planner_supervisor_state, config=self.config_instance)
             
-            planner_supervisor_logger.log_structured(
-                level="DEBUG",
-                message="tf_security_n_best_practices_evaluator created",
-                extra={
-                    "security_n_best_practices_evaluator_type": type(self.security_n_best_practices_evaluator).__name__
-                }
-            )
+            # planner_supervisor_logger.log_structured(
+            #     level="DEBUG",
+            #     message="tf_security_n_best_practices_evaluator created",
+            #     extra={
+            #         "security_n_best_practices_evaluator_type": type(self.security_n_best_practices_evaluator).__name__
+            #     }
+            # )
             
             planner_supervisor_logger.log_structured(
                 level="DEBUG",
@@ -250,7 +250,7 @@ class PlannerSubSupervisorAgent(BaseSubgraphAgent):
                 extra={}
             )
             
-            self.execution_planner = create_execution_planner_react_agent(config=self.config_instance)
+            self.execution_planner = create_execution_planner_react_agent(state=self._planner_supervisor_state, config=self.config_instance)
             
             planner_supervisor_logger.log_structured(
                 level="DEBUG",
@@ -265,11 +265,9 @@ class PlannerSubSupervisorAgent(BaseSubgraphAgent):
                 message="=== SUB-AGENTS INITIALIZATION COMPLETE ===",
                 extra={
                     "requirements_analyzer": "requirements_analyzer",
-                    "security_n_best_practices_evaluator": "security_n_best_practices_evaluator",
                     "execution_planner": "execution_planner",
                     "all_agents_created": all([
                         hasattr(self, 'requirements_analyzer'),
-                        hasattr(self, 'security_n_best_practices_evaluator'),
                         hasattr(self, 'execution_planner')
                     ])
                 }
@@ -300,18 +298,16 @@ Your role is to:
 
 Available agents:
 - requirements_analyzer: Analyzes business and technical requirements
-- security_n_best_practices_evaluator: Evaluates security and best practices of the AWS service
 - execution_planner: Creates execution plans and assesses risks
 
 Available handoff tools:
 - handoff_to_requirements_analyzer: Transfer to requirements analysis
-- handoff_to_security_n_best_practices_evaluator: Transfer to security_n_best_practices_evaluator
 - handoff_to_execution_planner: Transfer to execution planning
 - handoff_to_planner_complete: Mark planning complete and return to main supervisor
 
 Planning workflow:
 1. Start with requirements analysis (ALWAYS start here)
-2. Move to security_n_best_practices_evaluator (may require user input)
+2. Move to execution planning (may require user input)
 3. Complete with execution planning
 4. Mark planning complete when all phases are done
 
@@ -338,9 +334,7 @@ ROUTING DECISIONS:
 2. Check workflow_state.next_phase to determine routing:
    - If next_phase == "requirements_analysis" and not requirements_complete:
      → handoff_to_requirements_analyzer
-   - If next_phase == "security_n_best_practices_evaluator" and requirements_complete:
-     → handoff_to_security_n_best_practices_evaluator  
-   - If next_phase == "execution_planning" and security_n_best_practices_evaluator_complete:
+   - If next_phase == "execution_planning" and requirements_complete:
      → handoff_to_execution_planner
    - If next_phase == None (all phases complete):
      → handoff_to_planner_complete
@@ -394,58 +388,60 @@ When you receive a request:
                 }
             )
             return
-        
-        # Check for agent completions in recent messages
-        if state.messages:
-            recent_messages = state.messages[-3:]  # Check last 3 messages
-            for message in recent_messages:
-                if isinstance(message, AIMessage) and hasattr(message, 'content'):
-                    self._process_message_for_completion(state, message)
 
-    def _process_message_for_completion(self, state: PlannerSupervisorState, message: AIMessage) -> None:
-        """
-        Process a single message for agent completion indicators.
+        if hasattr(self._planner_supervisor_state.requirements_data, 'terraform_attribute_mapping'):
+            transform_data = self._planner_supervisor_state.requirements_data.terraform_attribute_mapping
+            if isinstance(transform_data, dict) and 'agent_completion' in transform_data:
+                completion_info = transform_data['agent_completion']
+                if completion_info.get('status') == 'completed':
+                    self._handle_requirements_analyzer_completion(state, transform_data, completion_info)
         
-        Args:
-            state: The current planner supervisor state
-            message: The AIMessage to process
-        """
-        content = message.content.lower()
-        has_agent_completion = 'agent_completion' in content
-        
-        if has_agent_completion and not state.workflow_state.planning_complete:
-            self._handle_agent_completion(state, content)
+        if hasattr(self._planner_supervisor_state.execution_data, 'agent_completion'):
+            completion_info = self._planner_supervisor_state.execution_data.agent_completion
+            if completion_info and completion_info.get('status') == 'completed':
+                execution_data = self._planner_supervisor_state.execution_data.execution_plan_data
+                self._handle_execution_planner_completion(state, execution_data, completion_info)
 
-    def _handle_agent_completion(self, state: PlannerSupervisorState, content: str) -> None:
-        """
-        Handle agent completion data and update state accordingly.
-        
-        Args:
-            state: The current planner supervisor state
-            content: The message content containing completion data
-        """
-        try:
-            # Parse the completion data
-            completion_data = json.loads(content)
             
-            if 'agent_completion' in completion_data:
-                agent_completion = completion_data['agent_completion']
-                agent_name = agent_completion.get('agent_name', 'unknown')
-                task_type = agent_completion.get('task_type', 'unknown')
-                
-                # Handle different agent types
-                if agent_name == 'requirements_analyzer' and task_type == 'terraform_attribute_mapping':
-                    self._handle_requirements_analyzer_completion(state, completion_data, agent_completion)
-                # Future agents can be added here
-                # elif agent_name == 'tf_security_n_best_practices_evaluator':
-                #     self._handle_security_analyzer_completion(state, completion_data, agent_completion)
-                
-        except (json.JSONDecodeError, Exception) as e:
-            planner_supervisor_logger.log_structured(
-                level="WARNING",
-                message="Failed to process agent completion data",
-                extra={"error": str(e), "content_preview": content[:200]}
-            )
+    def _handle_execution_planner_completion(self, state: PlannerSupervisorState, completion_data: list, agent_completion: dict) -> None:
+        """
+        Handle execution planner completion specifically.
+        
+        Args:
+            state: The current planner supervisor state
+            completion_data: The execution plan data (list of execution plans)
+            agent_completion: The agent completion metadata
+        """
+        # Preserve existing execution data from previous state
+        existing_data = self._planner_supervisor_state.execution_data
+        if existing_data:
+            state.execution_data.module_structure_plan = existing_data.module_structure_plan
+            state.execution_data.module_structure_plan_complete = existing_data.module_structure_plan_complete
+            state.execution_data.configuration_optimizer_data = existing_data.configuration_optimizer_data
+            state.execution_data.configuration_optimizer_complete = existing_data.configuration_optimizer_complete
+            state.execution_data.state_management_data = existing_data.state_management_data
+            state.execution_data.state_management_complete = existing_data.state_management_complete
+        
+        # Store the new execution plan data and completion status
+        state.execution_data.execution_plan_data = completion_data
+        state.execution_data.execution_plan_complete = True
+        state.execution_data.agent_completion = agent_completion
+        
+        # Log completion
+        planner_supervisor_logger.log_structured(
+            level="INFO",
+            message="Execution planner completed",
+            extra={
+                "agent_name": agent_completion.get('agent_name'),
+                "task_type": agent_completion.get('task_type'),
+                "data_type": agent_completion.get('data_type'),
+                "completion_timestamp": agent_completion.get('timestamp')
+            }
+        )
+        
+        # Mark phase complete
+        state.set_phase_complete("execution_planning")
+        state.execution_data.timestamp = datetime.now().isoformat()
 
     def _handle_requirements_analyzer_completion(self, state: PlannerSupervisorState, completion_data: dict, agent_completion: dict) -> None:
         """
@@ -672,7 +668,7 @@ When you receive a request:
             
             # Create supervisor with the SAME state instance that requirements analyzer uses
             planner_supervisor = create_supervisor(
-                agents=[self.requirements_analyzer, self.security_n_best_practices_evaluator, self.execution_planner],
+                agents=[self.requirements_analyzer, self.execution_planner],
                 prompt=self.supervisor_prompt,
                 model=self.model,
                 tools=list(self.handoff_tools.values()),

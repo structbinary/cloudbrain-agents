@@ -18,9 +18,15 @@ class DefaultConfig:
     """Default configuration for the AWS Orchestrator Agent."""
     # LLM Configuration
     LLM_PROVIDER: str = "openai"
-    LLM_MODEL: str = "gpt-4o"
+    LLM_MODEL: str = "gpt-4o-mini"
     LLM_TEMPERATURE: float = 0.0
-    LLM_MAX_TOKENS: int = 8000
+    LLM_MAX_TOKENS: int = 12000
+    
+    # Higher LLM Configuration (for complex reasoning tasks)
+    LLM_HIGHER_PROVIDER: str = "openai"
+    LLM_HIGHER_MODEL: str = "gpt-4o"
+    LLM_HIGHER_TEMPERATURE: float = 0.0
+    LLM_HIGHER_MAX_TOKENS: int = 15000
     
     # Logging Configuration
     LOG_LEVEL: str = "INFO"
@@ -132,3 +138,34 @@ class DefaultConfig:
     # A2A Server Configuration
     A2A_SERVER_HOST: str = "localhost"
     A2A_SERVER_PORT: int = 10102
+    
+    # Configuration Optimizer Default Values
+    CONFIG_OPTIMIZER_ENVIRONMENT: str = "prod"
+    CONFIG_OPTIMIZER_EXPECTED_LOAD: str = "high"
+    CONFIG_OPTIMIZER_BUDGET_CONSTRAINTS: str = "Optimize TCO; minimize data transfer costs; ensure high availability; right-size resources."
+    CONFIG_OPTIMIZER_COMPLIANCE_REQUIREMENTS: list = ["SOC2-Type-II", "ISO-27001", "GDPR", "CCPA", "PCI-DSS"]
+    CONFIG_OPTIMIZER_OPTIMIZATION_TARGETS: list = ["security", "reliability", "cost", "performance", "operational_excellence"]
+    CONFIG_OPTIMIZER_ORGANIZATION_STANDARDS: dict = {
+        "naming_conventions": ["lowercase-hyphen", "$<app>-$<env>-$<region>"],
+        "tagging": {
+            "required_keys": ["Name", "Environment", "Owner", "Application", "CostCenter", "DataClassification", "ManagedBy", "TerraformModule"]
+        },
+        "encryption": {"at_rest": "KMS-CMK-required", "in_transit": "TLS1.2+"},
+        "logging": {"centralized": "CloudWatch/S3", "retention_days": 365},
+        "availability": {"multi_az": True, "backup_strategy": "automated", "disaster_recovery": "enabled"},
+        "compliance": {"data_residency": "region-locked", "pii_handling": "least-privilege"},
+        "iac": {"terraform_version": ">=1.5", "providers_pinned": True, "code_review": "required"}
+    }
+    # State Management Configuration
+    STATE_MGMT_DEFAULT_INFRASTRUCTURE_SCALE: str = "medium"
+    STATE_MGMT_DEFAULT_ENVIRONMENTS: list = ["dev", "staging", "prod"]
+    STATE_MGMT_DEFAULT_AWS_REGION: str = "us-east-1"
+    STATE_MGMT_DEFAULT_MULTI_REGION: bool = False
+    STATE_MGMT_DEFAULT_TEAM_SIZE: str = "small"
+    STATE_MGMT_DEFAULT_TEAMS: list = ["platform", "development", "operations"]
+    STATE_MGMT_DEFAULT_CONCURRENT_OPERATIONS: str = "low"
+    STATE_MGMT_DEFAULT_CI_CD_INTEGRATION: str = "GitHub Actions"
+    STATE_MGMT_DEFAULT_ENCRYPTION_REQUIRED: bool = True
+    STATE_MGMT_DEFAULT_AUDIT_LOGGING: bool = True
+    STATE_MGMT_DEFAULT_BACKUP_RETENTION_DAYS: int = 30
+    STATE_MGMT_DEFAULT_COMPLIANCE_STANDARDS: list = ["SOC2-Type-II", "ISO-27001"]

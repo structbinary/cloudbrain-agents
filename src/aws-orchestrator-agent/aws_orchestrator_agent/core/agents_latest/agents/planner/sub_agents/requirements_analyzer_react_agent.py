@@ -23,8 +23,10 @@ from aws_orchestrator_agent.core.agents_latest.agents.planner.planner_supervisor
 from .requirement_analyser_prompts import (
     AWS_SERVICE_DISCOVERY_SYSTEM_PROMPT,
     AWS_SERVICE_DISCOVERY_HUMAN_PROMPT,
-    TERRAFORM_ATTRIBUTE_MAPPER_DIRECT_SYSTEM_PROMPT,
-    TERRAFORM_ATTRIBUTE_MAPPER_DIRECT_HUMAN_PROMPT
+    TERRAFORM_RESOURCE_ATTRIBUTES_SYSTEM_PROMPT,
+    TERRAFORM_RESOURCE_ATTRIBUTES_HUMAN_PROMPT,
+    TERRAFORM_ATTRIBUTE_MAPPER_COORDINATOR_SYSTEM_PROMPT,
+    TERRAFORM_ATTRIBUTE_MAPPER_COORDINATOR_HUMAN_PROMPT
 )
 from ..planner_utils import create_agent_completion_data
 
@@ -35,6 +37,7 @@ requirements_logger = AgentLogger("REQUIREMENTS_ANALYZER_REACT")
 
 # Global variables for LLM and parsers
 _model = None
+_model_higher = None  # Higher-tier model for complex reasoning tasks
 _requirements_parser_prompt = None
 _infra_requirements_parser = None
 _service_discovery_parser = None
@@ -43,6 +46,7 @@ _service_discovery_human_prompt = None
 _service_discovery_prompt = None
 _mcp_client = None
 _terraform_attribute_mapping_parser = None
+_terraform_resource_attributes_parser = None
 
 # Global variable for shared planner state access
 _shared_planner_state: Optional[PlannerSupervisorState] = None
@@ -132,26 +136,21 @@ class AttributeType(str, Enum):
     COMPUTED = "computed"
     DEPRECATED = "deprecated"
 
-class AttributeCategory(str, Enum):
-    """Attribute categorization for module design"""
-    ARGUMENT = "argument"  # Input parameter
-    REFERENCE = "reference"  # Output that can be referenced by other resources
-    COMPUTED = "computed"  # Read-only calculated value
-    DEPRECATED = "deprecated"  # No longer recommended
+
+
+class TerraformAttributeModuleDesign(BaseModel):
+    """Module design for a Terraform resource"""
+    recommended_arguments: List[str] = Field(..., description="Recommended arguments for the resource")
+    recommended_outputs: List[str] = Field(..., description="Recommended outputs for the resource")
 
 class TerraformAttribute(BaseModel):
-    """Enhanced Terraform attribute specification with categorization"""
+    """Simplified Terraform attribute specification"""
     name: str = Field(..., description="Attribute name")
     type: str = Field(..., description="Terraform data type (string, number, bool, list, map, object, etc.)")
     required: bool = Field(..., description="Whether this attribute is mandatory")
     description: str = Field(..., description="Detailed attribute description and purpose")
-    default_value: Optional[Any] = Field(None, description="Default value if any")
-    validation_rules: Optional[List[str]] = Field(None, description="Validation constraints and requirements")
     example_value: Optional[Any] = Field(None, description="Practical example value")
-    category: AttributeCategory = Field(..., description="Whether this is an argument, reference, computed, or deprecated")
-    is_output: bool = Field(False, description="Whether this attribute can be exposed as module output")
-    is_reference: bool = Field(False, description="Whether this attribute can be referenced by dependent resources")
-    documentation_url: Optional[str] = Field(None, description="Link to Terraform documentation")
+    
 
 class TerraformResourceSpecification(BaseModel):
     """Enhanced Terraform resource specification with comprehensive attributes"""
@@ -163,7 +162,7 @@ class TerraformResourceSpecification(BaseModel):
     computed_attributes: List[TerraformAttribute] = Field(..., description="Computed/read-only attributes")
     deprecated_attributes: List[TerraformAttribute] = Field(default_factory=list, description="Deprecated attributes")
     version_requirements: Optional[str] = Field(None, description="Provider version requirements")
-    resource_url: Optional[str] = Field(None, description="Link to Terraform documentation")
+    module_design: TerraformAttributeModuleDesign = Field(..., description="Module design for the attribute")
 
 class TerraformServiceAttributeMapping(BaseModel):
     """Attribute mapping for a single AWS service"""
@@ -180,9 +179,10 @@ class TerraformAttributeMapping(BaseModel):
 
 def _initialize_requirements_tools(config: Config):
     """Initialize LLM and parsers for requirements tools."""
-    global _model, _infra_requirements_parser, _requirements_parser_prompt, _service_discovery_parser, _service_discovery_prompt, _service_discovery_system_prompt, _service_discovery_human_prompt, _mcp_client, _terraform_attribute_mapping_parser
+    global _model, _model_higher, _infra_requirements_parser, _requirements_parser_prompt, _service_discovery_parser, _service_discovery_prompt, _service_discovery_system_prompt, _service_discovery_human_prompt, _mcp_client, _terraform_attribute_mapping_parser, _terraform_resource_attributes_parser
     
     if _model is None:
+        # Initialize standard LLM for simple tasks
         llm_config = config.get_llm_config()
         _model = LLMProvider.create_llm(
             provider=llm_config['provider'],
@@ -190,11 +190,22 @@ def _initialize_requirements_tools(config: Config):
             temperature=llm_config['temperature'],
             max_tokens=llm_config['max_tokens']
         )
+        
+        # Initialize higher-tier LLM for complex reasoning tasks
+        llm_higher_config = config.get_llm_higher_config()
+        _model_higher = LLMProvider.create_llm(
+            provider=llm_higher_config['provider'],
+            model=llm_higher_config['model'],
+            temperature=llm_higher_config['temperature'],
+            max_tokens=llm_higher_config['max_tokens']
+        )
+        
         _mcp_client = create_mcp_client(host=config.TERRAFORM_MCP_SERVER_HOST, port=config.TERRAFORM_MCP_SERVER_PORT, transport=config.TERRAFORM_MCP_SERVER_TRANSPORT)
         
         _infra_requirements_parser = JsonOutputParser(pydantic_object=InfrastructureRequirements)
         _service_discovery_parser = JsonOutputParser(pydantic_object=AWSServiceMapping)
         _terraform_attribute_mapping_parser = JsonOutputParser(pydantic_object=TerraformAttributeMapping)
+        _terraform_resource_attributes_parser = JsonOutputParser(pydantic_object=TerraformResourceSpecification)
         _service_discovery_system_prompt = AWS_SERVICE_DISCOVERY_SYSTEM_PROMPT
         _service_discovery_human_prompt = AWS_SERVICE_DISCOVERY_HUMAN_PROMPT
         _service_discovery_prompt = ChatPromptTemplate.from_messages([
@@ -410,7 +421,7 @@ async def aws_service_discovery_tool(requirements_analysis: str) -> AWSServiceMa
             }
         )
         
-        if _model is None:
+        if _model is None or _model_higher is None:
             raise ValueError("Requirements tools not initialized. Call _initialize_requirements_tools first.")
         
         # Debug the input and prompt template
@@ -510,12 +521,13 @@ async def aws_service_discovery_tool(requirements_analysis: str) -> AWSServiceMa
 @tool
 async def get_final_resource_attributes_tool(aws_service_mapping: str) -> TerraformAttributeMapping: 
     """
-    Get the final resource attributes for the service via React agent.
+    Get the final resource attributes for the service via Coordinator React agent.
     
     This tool:
     - Parses AWS service mapping to identify Terraform resources
-    - Uses React agent to generate comprehensive attribute specifications
-    - Analyzes and categorizes all attributes (required/optional/computed/deprecated)
+    - Uses Coordinator React agent to orchestrate individual resource analysis
+    - Calls get_terraform_resource_attributes_tool for each individual resource
+    - Aggregates individual resource results into comprehensive service-level mappings
     - Provides production-grade attribute recommendations and best practices
     - Returns comprehensive attribute mapping with detailed specifications
 
@@ -531,76 +543,59 @@ async def get_final_resource_attributes_tool(aws_service_mapping: str) -> Terraf
         # Log the input received
         requirements_logger.log_structured(
             level="INFO",
-            message="=== GET_FINAL_RESOURCE_ATTRIBUTES_TOOL STARTED (REACT AGENT) ===",
+            message="=== GET_FINAL_RESOURCE_ATTRIBUTES_TOOL STARTED (COORDINATOR AGENT) ===",
             extra={
                 "input_type": type(aws_service_mapping).__name__,
                 "input_length": len(aws_service_mapping) if aws_service_mapping else 0,
                 "input_preview": aws_service_mapping[:200] + "..." if aws_service_mapping and len(aws_service_mapping) > 200 else aws_service_mapping,
                 "tool_name": "get_final_resource_attributes_tool",
-                "approach": "react_agent_no_tools"
+                "approach": "coordinator_with_individual_tool"
             }
         )
         global _model, _terraform_attribute_mapping_parser
         
         if _model is None:
             raise ValueError("Requirements tools not initialized. Call _initialize_requirements_tools first.")
+    
         
-        # Parse the AWS service mapping
-        if isinstance(aws_service_mapping, str):
-            aws_service_mapping = json.loads(aws_service_mapping)
-        
-        # Pre-format the prompt with the actual data
-        escaped_mapping = json.dumps(aws_service_mapping, indent=2).replace("{", "{{").replace("}", "}}")
-        formatted_system_prompt = TERRAFORM_ATTRIBUTE_MAPPER_DIRECT_SYSTEM_PROMPT
-        formatted_human_prompt = TERRAFORM_ATTRIBUTE_MAPPER_DIRECT_HUMAN_PROMPT.replace("{aws_service_mapping}", escaped_mapping)
-        
-        # Create the prompt template for React agent
-        attribute_prompt_template = ChatPromptTemplate.from_messages([
-            ("system", formatted_system_prompt),
-            ("human", formatted_human_prompt)
-        ])
-        
-        requirements_logger.log_structured(
-            level="DEBUG",
-            message="React agent prompt template created successfully",
-            extra={
-                "prompt_type": type(attribute_prompt_template).__name__,
-                "has_system_message": True,
-                "has_human_message": True
-            }
-        )
-        
-        # Create React agent without tools
+        # Create React agent WITH the individual resource tool
+        # Use the system prompt as the agent's prompt (simple string)
         attribute_agent = create_react_agent(
             model=_model,
-            tools=[],  # No tools needed - pure reasoning
-            name="attribute_agent",
-            prompt=attribute_prompt_template
+            tools=[get_terraform_resource_attributes_tool],  # Add the individual resource tool
+            name="attribute_coordinator_agent",
+            prompt=TERRAFORM_ATTRIBUTE_MAPPER_COORDINATOR_SYSTEM_PROMPT
         )
         
         requirements_logger.log_structured(
             level="DEBUG",
-            message="React agent created successfully, invoking with AWS service mapping",
+            message="React agent coordinator created successfully, invoking with AWS service mapping",
             extra={
                 "agent_type": type(attribute_agent).__name__,
-                "tools_count": 0,
-                "has_response_format": True
+                "tools_count": 1,
+                "has_response_format": True,
+                "approach": "coordinator_with_individual_tool"
             }
         )
         
-        # Invoke the React agent
+        # Format the human prompt with the AWS service mapping
+        formatted_human_prompt = TERRAFORM_ATTRIBUTE_MAPPER_COORDINATOR_HUMAN_PROMPT.format(aws_service_mapping=aws_service_mapping)
+        
+        # Invoke the React agent with proper message dict
         result = await attribute_agent.ainvoke({
-            "aws_service_mapping": aws_service_mapping
+            "messages": [
+                {"role": "user", "content": formatted_human_prompt}
+            ]
         })
         
         requirements_logger.log_structured(
             level="INFO",
-            message="React agent completed successfully",
+            message="React agent coordinator completed successfully",
             extra={
                 "result_type": type(result).__name__,
                 "result_has_content": hasattr(result, 'content') if hasattr(result, '__dict__') else False,
                 "result_length": len(str(result)) if result else 0,
-                "approach": "react_agent_no_tools"
+                "approach": "coordinator_with_individual_tool"
             }
         )
         
@@ -638,7 +633,7 @@ async def get_final_resource_attributes_tool(aws_service_mapping: str) -> Terraf
         # Log successful completion
         requirements_logger.log_structured(
             level="INFO",
-            message="Terraform attribute mapping completed successfully (React Agent)",
+            message="Terraform attribute mapping completed successfully (Coordinator Agent)",
             extra={
                 "completion_ready": True,
                 "services_count": len(parsed_result.get('services', [])),
@@ -646,7 +641,7 @@ async def get_final_resource_attributes_tool(aws_service_mapping: str) -> Terraf
                 "workflow_phase": "attribute_mapping",
                 "has_required_fields": True,
                 "json_structure_valid": True,
-                "approach": "react_agent_no_tools"
+                "approach": "coordinator_with_individual_tool"
             }
         )
         
@@ -655,11 +650,139 @@ async def get_final_resource_attributes_tool(aws_service_mapping: str) -> Terraf
     except Exception as e:
         requirements_logger.log_structured(
             level="ERROR",
-            message=f"Terraform attribute mapping failed (React Agent): {e}",
-            extra={"error": str(e), "error_type": type(e).__name__, "approach": "react_agent_no_tools"}
+            message=f"Terraform attribute mapping failed (Coordinator Agent): {e}",
+            extra={"error": str(e), "error_type": type(e).__name__, "approach": "coordinator_with_individual_tool"}
         )
         return json.dumps({"error": f"Terraform attribute mapping failed: {str(e)}"})
 
+@tool
+async def get_terraform_resource_attributes_tool(terraform_resource_name: str) -> TerraformResourceSpecification:
+    """
+    Get comprehensive attribute specifications for a single Terraform resource.
+    
+    This tool:
+    - Takes a single Terraform resource name as input
+    - Analyzes the resource in detail to generate comprehensive attribute specifications
+    - Categorizes attributes as required/optional/computed/deprecated with argument/reference classification
+    - Provides production-grade attribute specifications with detailed descriptions, types, and examples
+    - Returns complete TerraformResourceSpecification for the individual resource
+
+    Args:
+        terraform_resource_name: Name of the Terraform resource (e.g., "aws_s3_bucket")
+        
+    Returns:
+        TerraformResourceSpecification: Complete attribute specifications for the resource including:
+            - resource_name: The Terraform resource name
+            - provider: Provider name (e.g., aws)
+            - description: Resource description and purpose
+            - required_attributes: List of mandatory attributes
+            - optional_attributes: List of optional attributes
+            - computed_attributes: List of computed/read-only attributes
+            - deprecated_attributes: List of deprecated attributes
+            - version_requirements: Provider version requirements if any
+
+    """
+    try:
+        # Log the input received
+        requirements_logger.log_structured(
+            level="INFO",
+            message="=== GET_TERRAFORM_RESOURCE_ATTRIBUTES_TOOL STARTED ===",
+            extra={
+                "input_type": type(terraform_resource_name).__name__,
+                "input_value": terraform_resource_name,
+                "tool_name": "get_terraform_resource_attributes_tool",
+                "approach": "single_resource_analysis"
+            }
+        )
+        global _model, _terraform_resource_attributes_parser, _model_higher
+        
+        if _model is None or _model_higher is None:
+            raise ValueError("Requirements tools not initialized. Call _initialize_requirements_tools first.")
+        
+        # Create the prompt template for individual resource analysis
+        resource_prompt_template = ChatPromptTemplate.from_messages([
+            ("system", TERRAFORM_RESOURCE_ATTRIBUTES_SYSTEM_PROMPT),
+            ("human", TERRAFORM_RESOURCE_ATTRIBUTES_HUMAN_PROMPT)
+        ])
+        
+        requirements_logger.log_structured(
+            level="DEBUG",
+            message="Individual resource prompt template created successfully",
+            extra={
+                "prompt_type": type(resource_prompt_template).__name__,
+                "has_system_message": True,
+                "has_human_message": True,
+                "resource_name": terraform_resource_name
+            }
+        )
+        
+        # Format the prompt with the resource name
+        formatted_prompt = resource_prompt_template.format(terraform_resource_name=terraform_resource_name)
+        
+        # Get LLM response
+        llm_response = await _model.ainvoke(formatted_prompt)
+        
+        if isinstance(llm_response, AIMessage):
+            content = llm_response.content
+            content_str = str(content) if not isinstance(content, str) else content
+        else:
+            content_str = str(llm_response) if not isinstance(llm_response, str) else llm_response
+        
+        requirements_logger.log_structured(
+            level="DEBUG",
+            message="LLM response received for individual resource",
+            extra={
+                "response_type": type(llm_response).__name__,
+                "content_length": len(content_str) if content_str else 0,
+                "resource_name": terraform_resource_name
+            }
+        )
+        
+        # Log the raw content for debugging
+        requirements_logger.log_structured(
+            level="DEBUG",
+            message="Raw LLM response content",
+            extra={
+                "raw_content": content_str[:1000] if content_str else "No content",  # First 1000 chars
+                "resource_name": terraform_resource_name
+            }
+        )
+        
+        # Parse the result using the TerraformResourceSpecification parser
+        parsed_result = _terraform_resource_attributes_parser.parse(content_str)
+        
+        # Log successful completion
+        requirements_logger.log_structured(
+            level="INFO",
+            message="Individual Terraform resource attributes completed successfully",
+            extra={
+                "completion_ready": True,
+                "resource_name": terraform_resource_name,
+                "required_attributes_count": len(parsed_result.get('required_attributes', [])),
+                "optional_attributes_count": len(parsed_result.get('optional_attributes', [])),
+                "computed_attributes_count": len(parsed_result.get('computed_attributes', [])),
+                "deprecated_attributes_count": len(parsed_result.get('deprecated_attributes', [])),
+                "workflow_phase": "individual_resource_analysis",
+                "has_required_fields": True,
+                "json_structure_valid": True,
+                "approach": "single_resource_analysis"
+            }
+        )
+        
+        return parsed_result
+            
+    except Exception as e:
+        requirements_logger.log_structured(
+            level="ERROR",
+            message=f"Individual Terraform resource attributes failed: {e}",
+            extra={
+                "error": str(e), 
+                "error_type": type(e).__name__, 
+                "resource_name": terraform_resource_name,
+                "approach": "single_resource_analysis"
+            }
+        )
+        return json.dumps({"error": f"Individual Terraform resource attributes failed: {str(e)}"})
 
 def create_requirements_analyzer_react_agent(state: PlannerSupervisorState, config: Config):
     """
@@ -707,25 +830,17 @@ def create_requirements_analyzer_react_agent(state: PlannerSupervisorState, conf
         _initialize_requirements_tools(config)
         
         # Get LLM from config
-        llm_config = config.get_llm_config()
-        
+        # Use the already initialized _model instead of creating a new LLM instance
         requirements_logger.log_structured(
             level="DEBUG",
-            message="Creating LLM for requirements analyzer",
+            message="Using initialized LLM for requirements analyzer",
             extra={
-                "llm_provider": llm_config.get('provider'),
-                "llm_model": llm_config.get('model'),
-                "llm_temperature": llm_config.get('temperature'),
-                "llm_max_tokens": llm_config.get('max_tokens')
+                "llm_provider": "reused_from_global",
+                "llm_model": "reused_from_global"
             }
         )
         
-        llm = LLMProvider.create_llm(
-            provider=llm_config['provider'],
-            model=llm_config['model'],
-            temperature=llm_config['temperature'],
-            max_tokens=llm_config['max_tokens']
-        )
+        llm = _model_higher  # Reuse the globally initialized model
         
         # Create React agent with async tools
         requirements_logger.log_structured(
@@ -807,13 +922,23 @@ CRITICAL: Return ONLY the JSON object, no additional text or formatting.
             ])
         )
         
+        # Log the actual model configuration being used
+        requirements_logger.log_structured(
+            level="DEBUG",
+            message="Global model configuration details",
+            extra={
+                "global_model_type": type(_model).__name__,
+                "global_model_repr": str(_model)
+            }
+        )
+        
         requirements_logger.log_structured(
             level="INFO",
             message="=== REQUIREMENTS ANALYZER REACT AGENT CREATED SUCCESSFULLY ===",
             extra={
                 "agent_type": type(requirements_analyzer).__name__,
-                "llm_provider": llm_config['provider'],
-                "llm_model": llm_config['model'],
+                "global_model_type": type(_model).__name__,
+                "global_model_repr": str(_model),
                 "tools_count": 3,
                 "enhanced_prompt": True,
                 "json_output_required": True,
