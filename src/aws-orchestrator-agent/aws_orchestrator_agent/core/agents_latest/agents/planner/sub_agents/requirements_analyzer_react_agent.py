@@ -319,8 +319,8 @@ async def infra_requirements_parser_tool(user_query: str) -> InfrastructureRequi
             message="Starting async Infra requirements parser tool with state access",
             extra={
                 "user_request": user_query[:100] + "..." if len(user_query) > 100 else user_query,
-                "current_phase": getattr(_shared_planner_state.workflow_state, 'current_phase', 'unknown'),
-                "requirements_complete": getattr(_shared_planner_state.workflow_state, 'requirements_complete', False)
+                "current_phase": getattr(_shared_planner_state.planning_workflow_state, 'current_phase', 'unknown'),
+                "requirements_complete": getattr(_shared_planner_state.planning_workflow_state, 'requirements_complete', False)
             }
         )
         
@@ -416,8 +416,8 @@ async def aws_service_discovery_tool(requirements_analysis: str) -> AWSServiceMa
             message="Starting async AWS service discovery with state access",
             extra={
                 "requirements_analysis_length": len(requirements_analysis),
-                "current_phase": getattr(_shared_planner_state.workflow_state, 'current_phase', 'unknown'),
-                "requirements_complete": getattr(_shared_planner_state.workflow_state, 'requirements_complete', False)
+                "current_phase": getattr(_shared_planner_state.planning_workflow_state, 'current_phase', 'unknown'),
+                "requirements_complete": getattr(_shared_planner_state.planning_workflow_state, 'requirements_complete', False)
             }
         )
         
@@ -630,6 +630,10 @@ async def get_final_resource_attributes_tool(aws_service_mapping: str) -> Terraf
         _shared_planner_state.requirements_data.terraform_attribute_mapping = parsed_result
         _shared_planner_state.requirements_data.terraform_attribute_mapping_complete = True
         
+        # CRITICAL: Mark requirements analysis as complete in the workflow state
+        # This is what the supervisor checks to determine if requirements are complete
+        _shared_planner_state.planning_workflow_state.requirements_complete = True
+        
         # Log successful completion
         requirements_logger.log_structured(
             level="INFO",
@@ -811,8 +815,8 @@ def create_requirements_analyzer_react_agent(state: PlannerSupervisorState, conf
             message="State parameter stored globally",
             extra={
                 "state_type": type(state).__name__,
-                "has_workflow_state": hasattr(state, 'workflow_state'),
-                "current_phase": getattr(state.workflow_state, 'current_phase', 'unknown'),
+                "has_planning_workflow_state": hasattr(state, 'planning_workflow_state'),
+                "current_phase": getattr(state.planning_workflow_state, 'current_phase', 'unknown'),
                 "user_request": getattr(state, 'user_request', ''),
                 "task_description": getattr(state, 'task_description', ''),
                 "session_id": getattr(state, 'session_id', None),

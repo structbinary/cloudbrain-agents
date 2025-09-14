@@ -24,8 +24,8 @@ class DefaultConfig:
     
     # Higher LLM Configuration (for complex reasoning tasks)
     LLM_HIGHER_PROVIDER: str = "openai"
-    LLM_HIGHER_MODEL: str = "gpt-4o"
-    LLM_HIGHER_TEMPERATURE: float = 0.0
+    LLM_HIGHER_MODEL: str = "gpt-5-mini"
+    LLM_HIGHER_TEMPERATURE: float = 1
     LLM_HIGHER_MAX_TOKENS: int = 15000
     
     # Logging Configuration

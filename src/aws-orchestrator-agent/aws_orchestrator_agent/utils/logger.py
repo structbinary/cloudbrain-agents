@@ -17,7 +17,7 @@
 from colorama import Fore, Style
 from enum import Enum
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 from functools import wraps
 import functools
@@ -176,7 +176,7 @@ class AgentLogger:
         if config:
             structured = getattr(config, 'LOG_STRUCTURED_JSON', False)
         log_entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "agent_name": getattr(self, 'agent_name', None),
             "log_type": level,
             "message": message,

@@ -122,6 +122,115 @@ class AgentType(str, Enum):
     SECURITY = "security"
     COST = "cost"
 
+
+class SupervisorWorkflowState(BaseModel):
+    """
+    Workflow state tracking for the main supervisor following best practices.
+    
+    This schema provides:
+    - Type-safe workflow progress tracking
+    - Automatic phase transitions
+    - Loop prevention and error detection
+    - Integration with langgraph-supervisor
+    """
+    
+    # Current workflow phase
+    current_phase: str = Field(default="planning", description="Current workflow phase")
+    
+    # Phase completion tracking
+    planning_complete: bool = Field(default=False, description="Planning phase complete")
+    generation_complete: bool = Field(default=False, description="Generation phase complete")
+    validation_complete: bool = Field(default=False, description="Validation phase complete")
+    editing_complete: bool = Field(default=False, description="Editing phase complete")
+    
+    # Workflow control
+    workflow_complete: bool = Field(default=False, description="Overall workflow complete")
+    loop_counter: int = Field(default=0, ge=0, le=20, description="Loop counter for infinite loop prevention")
+    last_phase_transition: Optional[datetime] = Field(default=None, description="Timestamp of last phase transition")
+    error_occurred: bool = Field(default=False, description="Whether an error occurred")
+    error_message: Optional[str] = Field(default=None, description="Error message if any")
+    
+    # Agent handoff tracking
+    last_agent: Optional[str] = Field(default=None, description="Last agent that completed")
+    next_agent: Optional[str] = Field(default=None, description="Next agent to invoke")
+    handoff_reason: Optional[str] = Field(default=None, description="Reason for handoff")
+    
+    @property
+    def is_complete(self) -> bool:
+        """Check if all required phases are complete."""
+        # For infrastructure requests, we typically need planning + generation
+        # Validation and editing are optional based on requirements
+        return all([
+            self.planning_complete,
+            self.generation_complete
+        ])
+    
+    @property
+    def next_phase(self) -> Optional[str]:
+        """Determine the next phase based on completion status."""
+        if not self.planning_complete:
+            return "planning"
+        elif not self.generation_complete:
+            return "generation"
+        elif not self.validation_complete:
+            return "validation"  # Optional phase
+        elif not self.editing_complete:
+            return "editing"  # Optional phase
+        else:
+            return None  # All phases complete
+    
+    def increment_loop_counter(self) -> None:
+        """Increment loop counter and check for limits."""
+        self.loop_counter += 1
+        if self.loop_counter > 20:  # Higher limit for main supervisor
+            self.error_occurred = True
+            self.error_message = "Maximum iterations reached (20)"
+    
+    def set_phase_complete(self, phase: str) -> None:
+        """Mark a specific phase as complete and update state."""
+        if phase == "planning":
+            self.planning_complete = True
+        elif phase == "generation":
+            self.generation_complete = True
+        elif phase == "validation":
+            self.validation_complete = True
+        elif phase == "editing":
+            self.editing_complete = True
+        
+        # Update current phase and check if workflow is complete
+        if self.is_complete:
+            self.workflow_complete = True
+            self.current_phase = "complete"
+        else:
+            self.current_phase = self.next_phase or "complete"
+        
+        # Update transition timestamp
+        self.last_phase_transition = datetime.now(timezone.utc)
+    
+    def set_agent_handoff(self, from_agent: str, to_agent: str, reason: str) -> None:
+        """Track agent handoff for debugging and monitoring."""
+        self.last_agent = from_agent
+        self.next_agent = to_agent
+        self.handoff_reason = reason
+        self.last_phase_transition = datetime.now(timezone.utc)
+    
+    def get_workflow_progress(self) -> Dict[str, Any]:
+        """Get current workflow progress for monitoring."""
+        return {
+            "current_phase": self.current_phase,
+            "planning_complete": self.planning_complete,
+            "generation_complete": self.generation_complete,
+            "validation_complete": self.validation_complete,
+            "editing_complete": self.editing_complete,
+            "workflow_complete": self.workflow_complete,
+            "loop_counter": self.loop_counter,
+            "last_agent": self.last_agent,
+            "next_agent": self.next_agent,
+            "handoff_reason": self.handoff_reason,
+            "error_occurred": self.error_occurred,
+            "error_message": self.error_message
+        }
+
 class ValidationStatus(str, Enum):
     """Validation status enumeration."""
     PENDING = "pending"
@@ -153,6 +262,19 @@ class SupervisorState(BaseModel):
     
     # Core LangGraph-style state with proper message handling
     messages: Annotated[List[AnyMessage], add_messages] = Field(default_factory=list)
+    
+    # Required by langgraph-supervisor
+    remaining_steps: int = Field(default=50, description="Remaining steps for the agent to complete")
+    llm_input_messages: Annotated[List[AnyMessage], add_messages] = Field(
+        default_factory=list,
+        description="LLM input messages for langgraph-supervisor"
+    )
+    
+    # Workflow state tracking (PRIMARY METHOD - following best practices)
+    workflow_state: SupervisorWorkflowState = Field(
+        default_factory=SupervisorWorkflowState,
+        description="Workflow progress tracking with type-safe state management"
+    )
     
     # Minimal workflow metadata
     workflow_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -194,6 +316,19 @@ class SupervisorState(BaseModel):
     editor_data: Optional[Dict[str, Any]] = None
     security_data: Optional[Dict[str, Any]] = None
     cost_data: Optional[Dict[str, Any]] = None
+    
+    # Generation-specific context fields (extracted from planner_data for direct access)
+    execution_plan: Optional[Dict[str, Any]] = None  # Direct access to execution plan
+    resource_configurations: Optional[List[Dict[str, Any]]] = None
+    variable_definitions: Optional[List[Dict[str, Any]]] = None
+    data_sources: Optional[List[Dict[str, Any]]] = None
+    local_values: Optional[List[Dict[str, Any]]] = None
+    planning_dependencies: Optional[List[Dict[str, Any]]] = None
+    security_considerations: Optional[List[Dict[str, Any]]] = None
+    cost_estimates: Optional[List[Dict[str, Any]]] = None
+    module_name: Optional[str] = None
+    service_name: Optional[str] = None
+    target_environment: Optional[str] = None
     
     class Config:
         """Pydantic configuration."""
@@ -240,6 +375,16 @@ class GenerationState(BaseModel):
     # Quality checks
     warnings: List[str] = Field(default_factory=list)
     best_practices_applied: List[str] = Field(default_factory=list)
+    
+    # Direct execution plan data (from planner)
+    execution_plan: Optional[Dict[str, Any]] = None
+    resource_configurations: List[Dict[str, Any]] = Field(default_factory=list)
+    variable_definitions: List[Dict[str, Any]] = Field(default_factory=list)
+    data_sources: List[Dict[str, Any]] = Field(default_factory=list)
+    local_values: List[Dict[str, Any]] = Field(default_factory=list)
+    dependencies: List[Dict[str, Any]] = Field(default_factory=list)
+    security_considerations: List[Dict[str, Any]] = Field(default_factory=list)
+    cost_estimates: List[Dict[str, Any]] = Field(default_factory=list)
     
     class Config:
         """Pydantic configuration."""
@@ -409,15 +554,63 @@ class StateTransformer:
     """Handles state transformations between supervisor and agents."""
     
     @staticmethod
+    def supervisor_to_planner(supervisor_state: SupervisorState):
+        """Transform supervisor state to planner supervisor state."""
+        from .agents.planner.planner_supervisor_state import PlannerSupervisorState, PlanningWorkflowState
+        
+        return PlannerSupervisorState(
+            # Core fields
+            user_request=supervisor_state.user_request,
+            session_id=supervisor_state.session_id,
+            task_id=supervisor_state.task_id,
+            status="in_progress",
+            
+            # Messages - pass only the last human message for context
+            messages=[msg for msg in supervisor_state.messages if hasattr(msg, 'content')][-1:] if supervisor_state.messages else [],
+            
+            # LLM input messages - required by langgraph-supervisor
+            llm_input_messages=[msg for msg in supervisor_state.messages if hasattr(msg, 'content')][-1:] if supervisor_state.messages else [],
+            
+            # Planner-specific fields
+            active_agent="planner_sub_supervisor",
+            task_description=supervisor_state.user_request,
+            
+            # Workspace and context
+            workspace_ref=supervisor_state.workspace_ref,
+            terraform_context=supervisor_state.terraform_context or {},
+            
+            # Planning-specific data
+            requirements_analysis={},
+            execution_plan={},
+            provider_versions={},
+            standards_profile={},
+            
+            # Planning workflow state - use distinct field name to avoid conflict with supervisor's workflow_state
+            planning_workflow_state=PlanningWorkflowState(),
+        )
+    
+    @staticmethod
     def supervisor_to_generation(supervisor_state: SupervisorState) -> GenerationState:
-        """Transform supervisor state to generation state."""
+        """Transform supervisor state to generation state with full planner data."""
         planner_data = supervisor_state.planner_data or {}
+        execution_plan = planner_data.get("execution_plan", {})
+        
         return GenerationState(
             requirements=planner_data.get("requirements_analysis", {}),
             provider_versions=planner_data.get("provider_versions", {}),
             registry_schemas_ref=supervisor_state.workspace_ref,
             standards_profile=planner_data.get("standards_profile", {}),
-            module_name=f"module_{supervisor_state.workflow_id[:8]}",
+            module_name=execution_plan.get("module_name", f"module_{supervisor_state.workflow_id[:8]}"),
+            
+            # Direct execution plan data
+            execution_plan=execution_plan,
+            resource_configurations=execution_plan.get("resource_configurations", []),
+            variable_definitions=execution_plan.get("variable_definitions", []),
+            data_sources=execution_plan.get("data_sources", []),
+            local_values=execution_plan.get("local_values", []),
+            dependencies=execution_plan.get("dependencies", []),
+            security_considerations=execution_plan.get("security_considerations", []),
+            cost_estimates=execution_plan.get("cost_estimates", [])
         )
     
     @staticmethod
@@ -455,6 +648,24 @@ class StateTransformer:
             plan_json_ref=validation_data.get("terraform_plan", {}).get("plan_json_ref"),
             region=supervisor_state.terraform_context.get("region", "us-east-1") if supervisor_state.terraform_context else "us-east-1",
         )
+    
+    @staticmethod
+    def planner_to_supervisor(planner_state) -> Dict[str, Any]:
+        """Transform planner supervisor state back to supervisor updates."""
+        return {
+            "planner_data": {
+                "requirements_analysis": planner_state.requirements_analysis,
+                "execution_plan": planner_state.execution_plan,
+                "provider_versions": planner_state.provider_versions,
+                "standards_profile": planner_state.standards_profile,
+            },
+            "question": planner_state.question,
+            "current_agent": AgentType.GENERATION,  # Next step after planning
+            "workflow_state": {
+                "planning_complete": True,
+                "next_agent": "generation_agent",
+            }
+        }
     
     @staticmethod
     def generation_to_supervisor(generation_state: GenerationState) -> Dict[str, Any]:

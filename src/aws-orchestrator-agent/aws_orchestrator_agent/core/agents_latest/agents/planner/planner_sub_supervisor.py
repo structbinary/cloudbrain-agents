@@ -330,8 +330,11 @@ STATE HANDLING:
 - Pass the session_id and task_id through to maintain context
 
 ROUTING DECISIONS:
-1. Check workflow_state.loop_counter - if > 10, terminate with error
-2. Check workflow_state.next_phase to determine routing:
+1. Check planning_workflow_state.loop_counter - if > 10, terminate with error
+2. Check if planning is complete:
+   - If planning_workflow_state.planning_complete == True:
+     → handoff_to_planner_complete
+3. Check planning_workflow_state.next_phase to determine routing:
    - If next_phase == "requirements_analysis" and not requirements_complete:
      → handoff_to_requirements_analyzer
    - If next_phase == "execution_planning" and requirements_complete:
@@ -341,8 +344,11 @@ ROUTING DECISIONS:
 
 COMPLETION VALIDATION:
 - After each agent handoff, validate that the expected completion flag is set
+- Check if planning_workflow_state.planning_complete == True to determine if all phases are done
 - If completion flag not set after reasonable time, log error and retry once
 - If retry fails, terminate workflow and escalate to human
+- **CRITICAL: When planning_complete == True, you MUST immediately call handoff_to_planner_complete**
+- **DO NOT continue processing after planning is complete - ALWAYS call the handoff tool**
 
 ERROR HANDLING:
 - Loop counter exceeded: Terminate with "Maximum iterations reached"
@@ -351,11 +357,17 @@ ERROR HANDLING:
 
 When you receive a request:
 1. Check the state for user_request and task_description
-2. Check workflow_state.next_phase to determine the correct agent to hand off to
+2. Check planning_workflow_state.next_phase to determine the correct agent to hand off to
 3. Only hand off to requirements_analyzer if requirements_complete = False
 4. Let the specialized agent determine if more information is needed
 5. Continue the workflow based on completion status
-6. When all phases are complete, use handoff_to_planner_complete to terminate"""),
+6. **MANDATORY: When all phases are complete (planning_complete == True), you MUST call handoff_to_planner_complete**
+
+**TOOL CALL REQUIREMENTS:**
+- You MUST use the handoff tools to transfer control - do not just return text
+- When planning_workflow_state.planning_complete == True, immediately call handoff_to_planner_complete
+- Do not provide text responses when you should be calling tools
+- The handoff tools are the ONLY way to properly complete the planning workflow"""),
             ("human", "{user_request}")
         ])
     
@@ -371,20 +383,20 @@ When you receive a request:
             level="DEBUG",
             message="Processing subsequent request - checking for agent outputs",
             extra={
-                "current_phase": getattr(state.workflow_state, 'current_phase', ''),
-                "planning_complete": getattr(state.workflow_state, 'planning_complete', False)
+                "current_phase": getattr(state.planning_workflow_state, 'current_phase', ''),
+                "planning_complete": getattr(state.planning_workflow_state, 'planning_complete', False)
             }
         )
         
         # Increment loop counter and check for errors
         state.increment_loop_counter()
-        if state.workflow_state.error_occurred:
+        if state.planning_workflow_state.error_occurred:
             planner_supervisor_logger.log_structured(
                 level="ERROR",
                 message="Loop limit exceeded in pre-model hook",
                 extra={
-                    "loop_counter": state.workflow_state.loop_counter,
-                    "error_message": state.workflow_state.error_message
+                    "loop_counter": state.planning_workflow_state.loop_counter,
+                    "error_message": state.planning_workflow_state.error_message
                 }
             )
             return
@@ -396,12 +408,134 @@ When you receive a request:
                 if completion_info.get('status') == 'completed':
                     self._handle_requirements_analyzer_completion(state, transform_data, completion_info)
         
-        if hasattr(self._planner_supervisor_state.execution_data, 'agent_completion'):
+        # Debug: Check if execution completion is detected
+        has_agent_completion = hasattr(self._planner_supervisor_state.execution_data, 'agent_completion')
+        planner_supervisor_logger.log_structured(
+            level="DEBUG",
+            message="Checking execution planner completion",
+            extra={
+                "has_agent_completion": has_agent_completion,
+                "execution_plan_complete": getattr(self._planner_supervisor_state.execution_data, 'execution_plan_complete', False),
+                "workflow_execution_complete": getattr(self._planner_supervisor_state.planning_workflow_state, 'execution_complete', False)
+            }
+        )
+        
+        if has_agent_completion:
             completion_info = self._planner_supervisor_state.execution_data.agent_completion
             if completion_info and completion_info.get('status') == 'completed':
                 execution_data = self._planner_supervisor_state.execution_data.execution_plan_data
+                planner_supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Execution planner completion detected - calling handler",
+                    extra={
+                        "completion_status": completion_info.get('status'),
+                        "has_execution_data": bool(execution_data)
+                    }
+                )
                 self._handle_execution_planner_completion(state, execution_data, completion_info)
+        
+        # Check if workflow is complete after processing agent completions
+        if self._is_workflow_complete(state):
+            # Handle workflow completion and prepare for Supervisor handoff
+            self._handle_workflow_completion(state)
+            
+            # CRITICAL DEBUG: Log the state that will be passed to the LLM
+            planner_supervisor_logger.log_structured(
+                level="INFO",
+                message="State being passed to LLM after workflow completion",
+                extra={
+                    "planning_complete": getattr(state.planning_workflow_state, 'planning_complete', False),
+                    "execution_complete": getattr(state.planning_workflow_state, 'execution_complete', False),
+                    "requirements_complete": getattr(state.planning_workflow_state, 'requirements_complete', False),
+                    "current_phase": getattr(state.planning_workflow_state, 'current_phase', ''),
+                    "next_phase": getattr(state.planning_workflow_state, 'next_phase', None),
+                    "status": getattr(state, 'status', ''),
+                    "active_agent": getattr(state, 'active_agent', ''),
+                    "should_call_handoff_tool": getattr(state.planning_workflow_state, 'planning_complete', False)
+                }
+            )
+            
+            # CRITICAL: Add explicit instruction to LLM when planning is complete
+            if getattr(state.planning_workflow_state, 'planning_complete', False):
+                planner_supervisor_logger.log_structured(
+                    level="WARNING",
+                    message="PLANNING COMPLETE - LLM MUST CALL handoff_to_planner_complete",
+                    extra={
+                        "planning_complete": True,
+                        "instruction": "LLM should call handoff_to_planner_complete tool immediately",
+                        "current_phase": getattr(state.planning_workflow_state, 'current_phase', ''),
+                        "next_phase": getattr(state.planning_workflow_state, 'next_phase', None)
+                    }
+                )
 
+    def _is_workflow_complete(self, state: PlannerSupervisorState) -> bool:
+        """
+        Check if the planning workflow is complete and ready for Supervisor handoff.
+        
+        Args:
+            state: The current planner supervisor state
+            
+        Returns:
+            bool: True if workflow is complete, False otherwise
+        """
+        # Check if execution planning is complete in the workflow state (this is what the supervisor checks)
+        execution_complete = getattr(state.planning_workflow_state, 'execution_complete', False)
+        
+        # Check if requirements analysis is complete (prerequisite)
+        requirements_complete = getattr(state.planning_workflow_state, 'requirements_complete', False)
+        
+        # Workflow is complete when both phases are done
+        is_complete = execution_complete and requirements_complete
+        
+        planner_supervisor_logger.log_structured(
+            level="DEBUG",
+            message="Workflow completion check",
+            extra={
+                "execution_complete": execution_complete,
+                "requirements_complete": requirements_complete,
+                "workflow_complete": is_complete,
+                "current_phase": getattr(state.planning_workflow_state, 'current_phase', ''),
+                "planning_complete": getattr(state.planning_workflow_state, 'planning_complete', False)
+            }
+        )
+        
+        return is_complete
+
+    def _handle_workflow_completion(self, state: PlannerSupervisorState) -> None:
+        """
+        Handle workflow completion and prepare for Supervisor handoff.
+        
+        Args:
+            state: The current planner supervisor state
+        """
+        planner_supervisor_logger.log_structured(
+            level="INFO",
+            message="Planning workflow complete - preparing Supervisor handoff",
+            extra={
+                "completion_timestamp": datetime.now().isoformat(),
+                "execution_plan_complete": getattr(state.execution_data, 'execution_plan_complete', False),
+                "requirements_complete": getattr(state.requirements_data, 'terraform_attribute_mapping_complete', False),
+                "current_phase": getattr(state.planning_workflow_state, 'current_phase', '')
+            }
+        )
+        
+        # Mark workflow as complete
+        state.planning_workflow_state.planning_complete = True
+        # Note: next_phase is a computed property, so we don't set it directly
+        
+        # Update status to indicate completion
+        state.status = "completed"
+        
+        # Log final state
+        planner_supervisor_logger.log_structured(
+            level="INFO",
+            message="Planning workflow marked as complete - ready for Supervisor handoff",
+            extra={
+                "workflow_status": state.status,
+                "planning_complete": state.planning_workflow_state.planning_complete,
+                "next_phase": state.planning_workflow_state.next_phase
+            }
+        )
             
     def _handle_execution_planner_completion(self, state: PlannerSupervisorState, completion_data: list, agent_completion: dict) -> None:
         """
@@ -423,9 +557,17 @@ When you receive a request:
             state.execution_data.state_management_complete = existing_data.state_management_complete
         
         # Store the new execution plan data and completion status
-        state.execution_data.execution_plan_data = completion_data
+        # Wrap list in dict to match Pydantic model expectations
+        if isinstance(completion_data, list):
+            state.execution_data.execution_plan_data = {"execution_plans": completion_data}
+        else:
+            state.execution_data.execution_plan_data = completion_data
         state.execution_data.execution_plan_complete = True
         state.execution_data.agent_completion = agent_completion
+        
+        # CRITICAL: Mark phase complete using the proper method
+        # This ensures both state objects are consistent and follows the same pattern as requirements
+        state.set_phase_complete("execution_planning")
         
         # Log completion
         planner_supervisor_logger.log_structured(
@@ -541,12 +683,19 @@ When you receive a request:
             def pre_model_hook(state: PlannerSupervisorState) -> PlannerSupervisorState:
                 """Transform incoming state to properly extract user_request and other context."""
                 try:
+                    # Enhanced logging for cancellation detection
                     planner_supervisor_logger.log_structured(
                         level="DEBUG",
                         message="Pre-model hook: Transforming incoming state",
                         extra={
                             "state_type": type(state).__name__,
-                            "messages_count": len(state.messages) if hasattr(state, 'messages') else 0
+                            "messages_count": len(state.messages) if hasattr(state, 'messages') else 0,
+                            "loop_counter": getattr(state.planning_workflow_state, 'loop_counter', 0) if hasattr(state, 'planning_workflow_state') else 0,
+                            "current_phase": getattr(state.planning_workflow_state, 'current_phase', 'unknown') if hasattr(state, 'planning_workflow_state') else 'unknown',
+                            "planning_complete": getattr(state.planning_workflow_state, 'planning_complete', False) if hasattr(state, 'planning_workflow_state') else False,
+                            "execution_complete": getattr(state.planning_workflow_state, 'execution_complete', False) if hasattr(state, 'planning_workflow_state') else False,
+                            "requirements_complete": getattr(state.planning_workflow_state, 'requirements_complete', False) if hasattr(state, 'planning_workflow_state') else False,
+                            "timestamp": datetime.now().isoformat()
                         }
                     )
                     
@@ -645,12 +794,18 @@ When you receive a request:
                         
                         # Create llm_input_messages with the extracted user request
                         llm_input_messages = [HumanMessage(content=user_request)]
+                        
+                        # Add system message to emphasize tool usage when planning is complete
+                        if getattr(state.planning_workflow_state, 'planning_complete', False):
+                            system_message = SystemMessage(content="CRITICAL: Planning is complete. You MUST call handoff_to_planner_complete tool immediately. Do not provide text responses.")
+                            llm_input_messages.insert(0, system_message)
+                        
                         state.llm_input_messages = llm_input_messages
                         self._planner_supervisor_state.session_id = state.session_id
                         self._planner_supervisor_state.task_id = state.task_id
                         self._planner_supervisor_state.user_request = state.user_request
                         self._planner_supervisor_state.task_description = state.task_description
-                        self._planner_supervisor_state.workflow_state.current_phase = state.workflow_state.current_phase
+                        self._planner_supervisor_state.planning_workflow_state.current_phase = state.planning_workflow_state.current_phase
                     
                     return state
                     
@@ -667,6 +822,7 @@ When you receive a request:
                     return state
             
             # Create supervisor with the SAME state instance that requirements analyzer uses
+            # Add proper configuration to prevent CancelledError issues
             planner_supervisor = create_supervisor(
                 agents=[self.requirements_analyzer, self.execution_planner],
                 prompt=self.supervisor_prompt,
@@ -674,6 +830,22 @@ When you receive a request:
                 tools=list(self.handoff_tools.values()),
                 state_schema=PlannerSupervisorState,
                 pre_model_hook=pre_model_hook,
+                add_handoff_back_messages=False,  # Ensure proper message handling
+                output_mode="last_message",
+                parallel_tool_calls=False,
+                # output_mode="full_history"  # Enable full history for debugging
+            )
+            
+            # Debug: Log tool availability
+            planner_supervisor_logger.log_structured(
+                level="DEBUG",
+                message="Handoff tools registered with supervisor",
+                extra={
+                    "tools_count": len(self.handoff_tools),
+                    "tool_names": list(self.handoff_tools.keys()),
+                    "tool_types": [type(tool).__name__ for tool in self.handoff_tools.values()],
+                    "has_handoff_to_planner_complete": "handoff_to_planner_complete" in self.handoff_tools
+                }
             )
             
             planner_supervisor_logger.log_structured(
@@ -840,7 +1012,7 @@ When you receive a request:
             )
             
             # Add initial message
-            from langchain_core.messages import HumanMessage
+            # from langchain_core.messages import HumanMessage
             initial_state.messages = [HumanMessage(content=task_description)]
             
             planner_supervisor_logger.log_structured(
@@ -856,7 +1028,7 @@ When you receive a request:
                 "session_id": initial_state.session_id,
                 "task_id": initial_state.task_id,
                 "remaining_steps": initial_state.remaining_steps,
-                "workflow_state": initial_state.workflow_state,
+                "planning_workflow_state": initial_state.planning_workflow_state,
                 "requirements_data": initial_state.requirements_data,
                 "dependency_data": initial_state.dependency_data,
                 "execution_data": initial_state.execution_data,
@@ -877,7 +1049,7 @@ When you receive a request:
                     "transformed_state_keys": list(transformed_state.keys()),
                     "final_user_request": transformed_state["user_request"],
                     "final_task_description": transformed_state["task_description"],
-                    "workflow_state_phase": transformed_state["workflow_state"].current_phase if hasattr(transformed_state["workflow_state"], 'current_phase') else "unknown"
+                    "workflow_state_phase": transformed_state["planning_workflow_state"].current_phase if hasattr(transformed_state["planning_workflow_state"], 'current_phase') else "unknown"
                 }
             )
             
@@ -952,7 +1124,7 @@ When you receive a request:
                 "messages": agent_state.get("messages", []),
                 "agent_result": {
                     "planning_results": planning_results,
-                    "workflow_state": agent_state.get("workflow_state"),
+                    "planning_workflow_state": agent_state.get("planning_workflow_state"),
                     "requirements_data": agent_state.get("requirements_data"),
                     "dependency_data": agent_state.get("dependency_data"),
                     "execution_data": agent_state.get("execution_data"),
@@ -960,7 +1132,7 @@ When you receive a request:
                 "agent_status": agent_state.get("status", "completed"),
                 "agent_metadata": {
                     "agent_name": self.name,
-                    "planning_phase": agent_state.get("workflow_state", {}).get("current_phase"),
+                    "planning_phase": agent_state.get("planning_workflow_state", {}).get("current_phase"),
                     "complexity_score": getattr(planning_results, 'overall_complexity_score', None),
                     "risk_level": getattr(planning_results, 'risk_level', None),
                 }

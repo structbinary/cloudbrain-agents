@@ -169,6 +169,7 @@ dependencies = [
     { name = "langchain-tavily" },
     { name = "langgraph" },
     { name = "langgraph-supervisor" },
+    { name = "langgraph-swarm" },
     { name = "loguru" },
     { name = "pinecone" },
     { name = "pydantic" },
@@ -196,6 +197,7 @@ requires-dist = [
     { name = "langchain-tavily", specifier = ">=0.2.11" },
     { name = "langgraph", specifier = ">=0.5.0" },
     { name = "langgraph-supervisor", specifier = ">=0.0.28" },
+    { name = "langgraph-swarm", specifier = ">=0.0.13" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pinecone", specifier = ">=7.3.0" },
     { name = "pydantic", specifier = ">=2.11.7" },
@@ -1194,6 +1196,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e1/68/22a491f4ad72c75c77014219073c77bf580892a75934488e7543b730bdde/langgraph_supervisor-0.0.28.tar.gz", hash = "sha256:58af7c66fd184bf8adaff14ea31270ba576ae0b6809537a74b9fa6cc217b28e3", size = 20968, upload-time = "2025-07-23T14:22:23.025Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/43/7c/434c06894f8585e7d869dbefdcfc80ec446ff5edde1844085c611dfa896b/langgraph_supervisor-0.0.28-py3-none-any.whl", hash = "sha256:4daaeef17dadf2fe701b7d8ff1b76623dafd80a0a605870c163f67a18f30641e", size = 15925, upload-time = "2025-07-23T14:22:21.902Z" },
+]
+
+[[package]]
+name = "langgraph-swarm"
+version = "0.0.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "langchain-core" },
+    { name = "langgraph" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2e/7f/b7b65157541315e7d4d550e8e61685273da4d17f20558a1ead385164ac44/langgraph_swarm-0.0.13.tar.gz", hash = "sha256:a5f97ba325ba6d9a86e0f9fc159035869d223eb60cc0f385be2ad4d7eefbbaca", size = 12095, upload-time = "2025-07-16T18:13:10.859Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c9/4f/8dc50350cf1b81df8e0df0dbd60b1d78d5161c019c536ca318f5d8554df3/langgraph_swarm-0.0.13-py3-none-any.whl", hash = "sha256:1ec02145d2e42155e26875d9b1bcf97d30ad113d1e180a61ed75457d2ca8ea10", size = 9980, upload-time = "2025-07-16T18:13:10.036Z" },
 ]
 
 [[package]]

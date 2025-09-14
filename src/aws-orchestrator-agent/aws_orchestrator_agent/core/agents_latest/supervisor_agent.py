@@ -16,6 +16,8 @@ from langgraph.graph.message import add_messages
 from langgraph.types import Send, Command
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.runnables import RunnableConfig
+import asyncio
+from contextlib import asynccontextmanager
 
 # Import langgraph-supervisor
 from langgraph_supervisor import create_supervisor
@@ -25,6 +27,7 @@ from .supervisor_handoff_tools import create_handoff_tools_for_agents
 
 from .types import (
     SupervisorState, 
+    SupervisorWorkflowState,
     AgentType, 
     get_state_class, 
     WorkflowStatus, 
@@ -44,6 +47,24 @@ from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 
 # Create agent logger for supervisor
 supervisor_logger = AgentLogger("SUPERVISOR")
+
+@asynccontextmanager
+async def isolation_shield():
+    """Shield sub-supervisor from parent cancellation"""
+    try:
+        yield
+    except asyncio.CancelledError:
+        supervisor_logger.log_structured(
+            level="WARNING",
+            message="Parent cancelled, but allowing sub-supervisor to complete",
+            extra={
+                "current_task": str(asyncio.current_task()) if asyncio.current_task() else "No current task",
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        # Don't re-raise immediately, allow graceful completion
+        await asyncio.sleep(0.1)  # Brief delay for cleanup
+        raise
 
 
 class CustomSupervisorAgent(BaseAgent):
@@ -183,12 +204,23 @@ class CustomSupervisorAgent(BaseAgent):
         3. Coordinate the workflow and handle any interruptions
         4. Ensure the final result meets the user's requirements
         
+        WORKFLOW RULES:
+        - For ANY infrastructure request (creating, writing, or generating Terraform modules), ALWAYS start by delegating to planner_sub_supervisor
+        - The planner_sub_supervisor will analyze requirements and create execution plans
+        - After planning is complete (when you receive planner_data), IMMEDIATELY delegate to generation_agent to generate the actual Terraform code
+        - Use validation_agent to validate the generated code if needed
+        - Use editor_agent to modify existing configurations if requested
+        
+        CRITICAL: When planning is complete, you MUST continue the workflow by delegating to the next agent. Do not stop or wait.
+        
         Instructions:
         - Delegate one agent at a time, do not call agents in parallel
         - Use the transfer_to_* tools to delegate tasks
         - Provide clear task descriptions to agents
         - Handle any human-in-the-loop interruptions
         - Return the final result when all work is complete
+        
+        IMPORTANT: For infrastructure requests like "help me write aws sns terraform module", ALWAYS start with planner_sub_supervisor.
         
         Do not do any work yourself - only delegate to the appropriate agents.
         """
@@ -239,7 +271,7 @@ class CustomSupervisorAgent(BaseAgent):
             )
             
             compiled_agent = agent.build_graph().compile(
-                checkpointer=self.memory,
+                # checkpointer=self.memory,
                 name=agent_name  # Set the agent name
             )
             
@@ -255,14 +287,78 @@ class CustomSupervisorAgent(BaseAgent):
             
             agents.append(compiled_agent)
         
-        # Create supervisor using langgraph-supervisor
+        # Create pre-model hook for workflow tracking and observability (SECONDARY METHOD)
+        def pre_model_hook(state: SupervisorState) -> SupervisorState:
+            """
+            Pre-model hook for workflow tracking and observability.
+            
+            This hook provides:
+            - Workflow progress tracking
+            - Agent completion detection
+            - Loop prevention
+            - Debugging and monitoring
+            """
+            try:
+                supervisor_logger.log_structured(
+                    level="DEBUG",
+                    message="Pre-model hook: Processing supervisor state",
+                    extra={
+                        "current_phase": state.workflow_state.current_phase,
+                        "workflow_complete": state.workflow_state.workflow_complete,
+                        "loop_counter": state.workflow_state.loop_counter,
+                        "last_agent": state.workflow_state.last_agent,
+                        "next_agent": state.workflow_state.next_agent
+                    }
+                )
+                
+                # Increment loop counter and check for errors
+                state.workflow_state.increment_loop_counter()
+                if state.workflow_state.error_occurred:
+                    supervisor_logger.log_structured(
+                        level="ERROR",
+                        message="Loop limit exceeded in supervisor pre-model hook",
+                        extra={
+                            "loop_counter": state.workflow_state.loop_counter,
+                            "error_message": state.workflow_state.error_message
+                        }
+                    )
+                    return state
+                
+                # Process agent completions and update workflow state
+                self._process_agent_completions(state)
+                
+                # Check if workflow should continue to next phase
+                if self._should_continue_workflow(state):
+                    self._prepare_next_phase(state)
+                
+                # Ensure llm_input_messages is populated for langgraph-supervisor
+                if not state.llm_input_messages and state.messages:
+                    # Use the last human message as LLM input
+                    for message in reversed(state.messages):
+                        if hasattr(message, 'content') and message.content:
+                            state.llm_input_messages = [message]
+                            break
+                
+                return state
+                
+            except Exception as e:
+                supervisor_logger.log_structured(
+                    level="ERROR",
+                    message=f"Error in pre-model hook: {e}",
+                    extra={"error": str(e), "error_type": type(e).__name__}
+                )
+                return state
+        
+        # Create supervisor using langgraph-supervisor with our custom state schema
         supervisor_graph = create_supervisor(
             agents=agents,
             model=self.model,
             tools=handoff_tools,
             prompt=self.prompt_template,
+            state_schema=SupervisorState,  # Use our custom state schema
             add_handoff_back_messages=True,
-            output_mode="full_history"
+            output_mode="full_history",
+            pre_model_hook=pre_model_hook  # Add pre-model hook for workflow tracking
         )
         
         # Debug: Log the supervisor graph structure
@@ -298,8 +394,8 @@ class CustomSupervisorAgent(BaseAgent):
         """
         Transform supervisor state to agent-specific state.
         
-        This method is kept for compatibility but langgraph-supervisor handles
-        most state management automatically through the handoff tools.
+        This method ensures that each agent receives only the data it needs
+        and doesn't interfere with other agents' state schemas.
         
         Args:
             agent_name: Name of the target agent
@@ -313,10 +409,7 @@ class CustomSupervisorAgent(BaseAgent):
             # Get the appropriate state class for this agent
             agent_type = self._get_agent_type_from_name(agent_name)
             
-            # For langgraph-supervisor, the handoff tools handle most state transformation
-            # This method is kept for any custom transformations we might need
-            
-            # Basic transformation - langgraph-supervisor handles the rest
+            # Create agent-specific state without workflow_state to avoid conflicts
             agent_state = {
                 "user_request": task_description,
                 "session_id": supervisor_state.session_id,
@@ -329,15 +422,20 @@ class CustomSupervisorAgent(BaseAgent):
             if supervisor_state.terraform_context:
                 agent_state["context"] = supervisor_state.terraform_context
             
+            # IMPORTANT: Do NOT pass supervisor's workflow_state to other agents
+            # Each agent should manage its own workflow state independently
+            # This prevents schema conflicts between different workflow state types
+            
             supervisor_logger.log_structured(
                 level="DEBUG",
-                message=f"Transformed state for {agent_name} using langgraph-supervisor pattern",
+                message=f"Transformed state for {agent_name} - excluded workflow_state to prevent schema conflicts",
                 extra={
                     "agent_name": agent_name,
                     "agent_type": agent_type.value,
                     "state_keys": list(agent_state.keys()),
                     "session_id": agent_state.get("session_id"),
                     "task_id": agent_state.get("task_id"),
+                    "note": "workflow_state excluded to prevent PlannerSupervisorState validation errors"
                 }
             )
             
@@ -372,6 +470,185 @@ class CustomSupervisorAgent(BaseAgent):
         }
         return name_to_type.get(agent_name, AgentType.PLANNER)
     
+    def _process_agent_completions(self, state: SupervisorState) -> None:
+        """
+        Process agent completions and update workflow state.
+        
+        This method detects when agents complete their work and updates
+        the workflow state accordingly, following best practices for
+        state management.
+        """
+        try:
+            # Check for planner completion
+            if (state.planner_data and 
+                not state.workflow_state.planning_complete and
+                self._is_planner_complete(state.planner_data)):
+                
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Planning phase completed - updating workflow state",
+                    extra={
+                        "current_phase": state.workflow_state.current_phase,
+                        "planning_complete": True
+                    }
+                )
+                
+                state.workflow_state.set_phase_complete("planning")
+                state.workflow_state.set_agent_handoff(
+                    from_agent="planner_sub_supervisor",
+                    to_agent="generation_agent",
+                    reason="Planning complete, proceeding to generation"
+                )
+            
+            # Check for generation completion
+            if (state.generation_data and 
+                not state.workflow_state.generation_complete and
+                self._is_generation_complete(state.generation_data)):
+                
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Generation phase completed - updating workflow state",
+                    extra={
+                        "current_phase": state.workflow_state.current_phase,
+                        "generation_complete": True
+                    }
+                )
+                
+                state.workflow_state.set_phase_complete("generation")
+                state.workflow_state.set_agent_handoff(
+                    from_agent="generation_agent",
+                    to_agent=None,  # No next agent, workflow complete
+                    reason="Generation complete, workflow finished"
+                )
+            
+            # Check for validation completion (optional phase)
+            if (state.validation_data and 
+                not state.workflow_state.validation_complete and
+                self._is_validation_complete(state.validation_data)):
+                
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Validation phase completed - updating workflow state",
+                    extra={
+                        "current_phase": state.workflow_state.current_phase,
+                        "validation_complete": True
+                    }
+                )
+                
+                state.workflow_state.set_phase_complete("validation")
+            
+            # Check for editing completion (optional phase)
+            if (state.editor_data and 
+                not state.workflow_state.editing_complete and
+                self._is_editing_complete(state.editor_data)):
+                
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Editing phase completed - updating workflow state",
+                    extra={
+                        "current_phase": state.workflow_state.current_phase,
+                        "editing_complete": True
+                    }
+                )
+                
+                state.workflow_state.set_phase_complete("editing")
+                
+        except Exception as e:
+            supervisor_logger.log_structured(
+                level="ERROR",
+                message=f"Error processing agent completions: {e}",
+                extra={"error": str(e), "error_type": type(e).__name__}
+            )
+    
+    def _is_planner_complete(self, planner_data: Dict[str, Any]) -> bool:
+        """Check if planner phase is complete."""
+        if not planner_data:
+            return False
+        
+        # Check for execution plan data which indicates completion
+        execution_data = planner_data.get("execution_data", {})
+        execution_plan_data = execution_data.get("execution_plan_data", {})
+        execution_plans = execution_plan_data.get("execution_plans", [])
+        
+        return len(execution_plans) > 0
+    
+    def _is_generation_complete(self, generation_data: Dict[str, Any]) -> bool:
+        """Check if generation phase is complete."""
+        if not generation_data:
+            return False
+        
+        # Check for generated module or completion status
+        return (generation_data.get("generated_module") is not None or
+                generation_data.get("status") == "completed")
+    
+    def _is_validation_complete(self, validation_data: Dict[str, Any]) -> bool:
+        """Check if validation phase is complete."""
+        if not validation_data:
+            return False
+        
+        # Check for validation report or completion status
+        return (validation_data.get("validation_report") is not None or
+                validation_data.get("status") == "completed")
+    
+    def _is_editing_complete(self, editor_data: Dict[str, Any]) -> bool:
+        """Check if editing phase is complete."""
+        if not editor_data:
+            return False
+        
+        # Check for edited module or completion status
+        return (editor_data.get("edited_module") is not None or
+                editor_data.get("status") == "completed")
+    
+    def _should_continue_workflow(self, state: SupervisorState) -> bool:
+        """Determine if workflow should continue to next phase."""
+        # Don't continue if workflow is already complete
+        if state.workflow_state.workflow_complete:
+            return False
+        
+        # Don't continue if there's an error
+        if state.workflow_state.error_occurred:
+            return False
+        
+        # Continue if there's a next phase available
+        return state.workflow_state.next_phase is not None
+    
+    def _prepare_next_phase(self, state: SupervisorState) -> None:
+        """Prepare the next phase of the workflow."""
+        try:
+            next_phase = state.workflow_state.next_phase
+            if not next_phase:
+                return
+            
+            supervisor_logger.log_structured(
+                level="INFO",
+                message=f"Preparing next phase: {next_phase}",
+                extra={
+                    "current_phase": state.workflow_state.current_phase,
+                    "next_phase": next_phase,
+                    "workflow_progress": state.workflow_state.get_workflow_progress()
+                }
+            )
+            
+            # Update status to indicate workflow should continue
+            state.status = WorkflowStatus.IN_PROGRESS
+            
+            # Set current agent based on next phase
+            if next_phase == "planning":
+                state.current_agent = AgentType.PLANNER
+            elif next_phase == "generation":
+                state.current_agent = AgentType.GENERATION
+            elif next_phase == "validation":
+                state.current_agent = AgentType.VALIDATION
+            elif next_phase == "editing":
+                state.current_agent = AgentType.EDITOR
+            
+        except Exception as e:
+            supervisor_logger.log_structured(
+                level="ERROR",
+                message=f"Error preparing next phase: {e}",
+                extra={"error": str(e), "error_type": type(e).__name__}
+            )
+    
     def _merge_agent_state_back_to_supervisor(self, agent_name: str, agent_state: Dict[str, Any], supervisor_state: SupervisorState) -> SupervisorState:
         """
         Merge agent state back into supervisor state.
@@ -392,14 +669,46 @@ class CustomSupervisorAgent(BaseAgent):
             
             # Handle planner sub-supervisor specially (it manages its own state)
             if agent_type == AgentType.PLANNER:
-                # The planner's output_transform() returns agent_result, but supervisor expects planner_data
-                # Map the structure correctly
+                # The planner handoff tool passes planner_data directly
+                # Extract planner_data from the agent state
+                planner_data = agent_state.get("planner_data", {})
+                
                 supervisor_updates = {
                     "messages": agent_state.get("messages", []),
-                    "planner_data": agent_state.get("agent_result", {}),
-                    "status": WorkflowStatus.COMPLETED if agent_state.get("agent_status") == "completed" else WorkflowStatus.IN_PROGRESS,
-                    "current_agent": None,  # Planning is complete, move to next phase
+                    "planner_data": planner_data,
+                    "status": WorkflowStatus.IN_PROGRESS,  # Keep workflow in progress to continue to next agent
+                    "current_agent": None,  # Planning is complete, supervisor will determine next agent
                 }
+                
+                # Update workflow state using the new tracking system
+                # Only update supervisor's workflow state, not the agent's
+                supervisor_state.workflow_state.set_phase_complete("planning")
+                supervisor_state.workflow_state.set_agent_handoff(
+                    from_agent="planner_sub_supervisor",
+                    to_agent="generation_agent",
+                    reason="Planning complete, proceeding to generation"
+                )
+                
+                # Extract execution plan data for direct access
+                if planner_data and "execution_data" in planner_data:
+                    execution_data = planner_data["execution_data"]
+                    if execution_data and "execution_plan_data" in execution_data:
+                        execution_plan_data = execution_data["execution_plan_data"]
+                        if execution_plan_data and "execution_plans" in execution_plan_data:
+                            execution_plans = execution_plan_data["execution_plans"]
+                            if execution_plans and len(execution_plans) > 0:
+                                # Extract the first execution plan for direct access
+                                first_plan = execution_plans[0]
+                                supervisor_updates.update({
+                                    "execution_plan": first_plan,
+                                    "resource_configurations": first_plan.get("resource_configurations", []),
+                                    "variable_definitions": first_plan.get("variable_definitions", []),
+                                    "data_sources": first_plan.get("data_sources", []),
+                                    "local_values": first_plan.get("local_values", []),
+                                    "module_name": first_plan.get("module_name", "terraform-module"),
+                                    "service_name": first_plan.get("service_name", "Unknown Service"),
+                                    "target_environment": first_plan.get("target_environment", "prod")
+                                })
                 
                 # Handle any questions from the planner
                 if "agent_metadata" in agent_state:
@@ -487,7 +796,7 @@ class CustomSupervisorAgent(BaseAgent):
     def name(self) -> str:
         """Get the name of the supervisor agent."""
         return self._name
-    
+
     @log_async
     async def stream(
         self,
@@ -570,54 +879,97 @@ class CustomSupervisorAgent(BaseAgent):
                 "messages_count": len(graph_input.get("messages", [])) if isinstance(graph_input, dict) else len(getattr(graph_input, "messages", [])),
             }
         )
+        config_with_durability = {
+            **config,
+            "durability": "async",
+            "subgraphs": True
+        }
         
         try:
-            # Use simple astream with values mode like reference
-            async for item in self.compiled_graph.astream(graph_input, config, stream_mode='values'):
-                step_count += 1
-                supervisor_logger.log_structured(
-                    level="DEBUG",
-                    message=f"[stream] step={step_count}",
-                    task_id=task_id,
-                    context_id=context_id,
-                    extra={
-                        "agent_name": self.__class__.__name__,
-                        "step_count": step_count,
-                        "item_keys": list(item.keys()) if isinstance(item, dict) else "not_dict"
-                    }
-                )
-
-                # 1. Handle human-in-the-loop interrupt (simple check like reference)
-                if '__interrupt__' in item:
-                    interrupt_payload = item['__interrupt__'][0].value  # dict passed to interrupt()
-                    yield AgentResponse(
-                        response_type='human_input',
-                        is_task_complete=False,
-                        require_user_input=True,
-                        content=interrupt_payload.get('question', 'Input required'),
-                        metadata={
-                            'session_id': context_id,
-                            'task_id': task_id,
-                            'agent_name': self.name,
-                            'step_count': step_count,
-                            'status': 'input_required'
+            # Use astream with values mode and subgraphs=True for proper handoff processing
+            # This ensures proper subgraph handoff processing and prevents NoneType iteration errors
+            async with isolation_shield():
+                async for item in self.compiled_graph.astream(graph_input, config_with_durability, stream_mode='values', subgraphs=True):
+                    step_count += 1
+                    
+                    # Handle None items from langgraph-supervisor
+                    if item is None:
+                        supervisor_logger.log_structured(
+                            level="WARNING",
+                            message=f"[stream] step={step_count} - Received None item from langgraph-supervisor",
+                            task_id=task_id,
+                            context_id=context_id,
+                            extra={
+                                "agent_name": self.__class__.__name__,
+                                "step_count": step_count,
+                                "item_type": "None"
+                            }
+                        )
+                        continue
+                
+                    supervisor_logger.log_structured(
+                        level="DEBUG",
+                        message=f"[stream] step={step_count}",
+                        task_id=task_id,
+                        context_id=context_id,
+                        extra={
+                            "agent_name": self.__class__.__name__,
+                            "step_count": step_count,
+                            "item_keys": list(item.keys()) if isinstance(item, dict) else "not_dict",
+                            "item_type": type(item).__name__
                         }
                     )
-                    # Pause streaming until client resumes with feedback
-                    break
 
-                # 2. Handle normal state updates (direct status-based responses like reference)
-                status = item.get('status')
-                question = item.get('question')
-                error = item.get('error')
-
-                if status is not None:
-                    if status == 'input_required':
+                    # Handle tuple format from subgraphs=True
+                    if isinstance(item, tuple) and len(item) == 2:
+                        # Extract state update from tuple (node_id, state_update)
+                        node_id, state_update = item
+                        item = state_update  # Use the state update part
+                        supervisor_logger.log_structured(
+                            level="DEBUG",
+                            message=f"[stream] step={step_count} - Extracted state from tuple",
+                            task_id=task_id,
+                            context_id=context_id,
+                            extra={
+                                "agent_name": self.__class__.__name__,
+                                "step_count": step_count,
+                                "node_id": str(node_id),
+                                "state_type": type(state_update).__name__,
+                                "state_keys": list(state_update.keys()) if isinstance(state_update, dict) else "not_dict",
+                                "status": state_update.get("status") if isinstance(state_update, dict) else None,
+                                "active_agent": state_update.get("active_agent") if isinstance(state_update, dict) else None,
+                                "planning_complete": state_update.get("planning_complete") if isinstance(state_update, dict) else None,
+                                "has_planner_data": bool(state_update.get("planner_data")) if isinstance(state_update, dict) else False,
+                                "planner_data_keys": list(state_update.get("planner_data", {}).keys()) if isinstance(state_update, dict) and state_update.get("planner_data") else [],
+                                "has_requirements_data": bool(state_update.get("planner_data", {}).get("requirements_data")) if isinstance(state_update, dict) else False,
+                                "has_execution_data": bool(state_update.get("planner_data", {}).get("execution_data")) if isinstance(state_update, dict) else False,
+                                "has_planning_results": bool(state_update.get("planner_data", {}).get("planning_results")) if isinstance(state_update, dict) else False,
+                                "messages_count": len(state_update.get("messages", [])) if isinstance(state_update, dict) else 0,
+                                "task_description": str(state_update.get("task_description", ""))[:100] if isinstance(state_update, dict) else ""
+                            }
+                        )
+                    elif not isinstance(item, dict):
+                        supervisor_logger.log_structured(
+                            level="WARNING",
+                            message=f"[stream] step={step_count} - Received non-dict item from langgraph-supervisor",
+                            task_id=task_id,
+                            context_id=context_id,
+                            extra={
+                                "agent_name": self.__class__.__name__,
+                                "step_count": step_count,
+                                "item_type": type(item).__name__,
+                                "item_value": str(item)[:200] if item else "None"
+                            }
+                        )
+                        continue
+                    # 1. Handle human-in-the-loop interrupt (simple check like reference)
+                    if '__interrupt__' in item:
+                        interrupt_payload = item['__interrupt__'][0].value  # dict passed to interrupt()
                         yield AgentResponse(
-                            response_type='text',
+                            response_type='human_input',
                             is_task_complete=False,
                             require_user_input=True,
-                            content=item.get('question') or 'More information needed to proceed.',
+                            content=interrupt_payload.get('question', 'Input required'),
                             metadata={
                                 'session_id': context_id,
                                 'task_id': task_id,
@@ -626,44 +978,113 @@ class CustomSupervisorAgent(BaseAgent):
                                 'status': 'input_required'
                             }
                         )
-                    elif status == 'error' or status == 'failed':
-                        yield AgentResponse(
-                            response_type='text',
-                            is_task_complete=False,
-                            require_user_input=True,
-                            content=item.get('question') or 'An error occurred while processing your request.',
-                            metadata={
-                                'session_id': context_id,
-                                'task_id': task_id,
-                                'agent_name': self.name,
-                                'step_count': step_count,
-                                'status': 'failed'
-                            }
-                        )
-                    elif status == 'completed':
-                        content_data = {
-                            'status': status,
-                            'question': item.get('question')
-                        }
-                        yield AgentResponse(
-                            response_type='data',
-                            is_task_complete=True,
-                            require_user_input=False,
-                            content=content_data,
-                            metadata={
-                                'session_id': context_id,
-                                'task_id': task_id,
-                                'agent_name': self.name,
-                                'step_count': step_count,
-                                'status': 'completed'
-                            }
-                        )
+                        # Pause streaming until client resumes with feedback
+                        break
+                    # 2. Handle normal state updates (direct status-based responses like reference)
+                    status = item.get('status')
+                    question = item.get('question')
+                    error = item.get('error')
+
+                    if status is not None:
+                        if status == 'input_required':
+                            yield AgentResponse(
+                                response_type='text',
+                                is_task_complete=False,
+                                require_user_input=True,
+                                content=item.get('question') or 'More information needed to proceed.',
+                                metadata={
+                                    'session_id': context_id,
+                                    'task_id': task_id,
+                                    'agent_name': self.name,
+                                    'step_count': step_count,
+                                    'status': 'input_required'
+                                }
+                            )
+                        elif status == 'error' or status == 'failed':
+                            yield AgentResponse(
+                                response_type='text',
+                                is_task_complete=False,
+                                require_user_input=True,
+                                content=item.get('question') or 'An error occurred while processing your request.',
+                                metadata={
+                                    'session_id': context_id,
+                                    'task_id': task_id,
+                                    'agent_name': self.name,
+                                    'step_count': step_count,
+                                    'status': 'failed'
+                                }
+                            )
+                        elif status == 'completed':
+                            # Get planning data and status for individual agent completion
+                            is_complete, planning_status = self._validate_planner_agent_completion(item)
+                            
+                            if is_complete:
+                                # Extract the actual planning data
+                                planning_data = planning_status.get('data_values', {})
+                                completion_metrics = planning_status.get('completion_metrics', {})
+                                
+                                # Create comprehensive content with real planning data
+                                content_data = {
+                                    'status': 'planning_complete',
+                                    'completion_metrics': completion_metrics,
+                                    'requirements_data': planning_data.get('requirements_data', ''),
+                                    'execution_data': planning_data.get('execution_data', ''),
+                                    'planning_state': planning_status.get('planning_state', {}),
+                                    'validation_result': planning_status.get('validation_result', 'PASS')
+                                }
+                                
+                                yield AgentResponse(
+                                    response_type='text',
+                                    is_task_complete=False,
+                                    require_user_input=False,
+                                    content=str(content_data),
+                                    metadata={
+                                        'session_id': context_id,
+                                        'task_id': task_id,
+                                        'agent_name': self.name,
+                                        'step_count': step_count,
+                                        'status': 'planning_data_available',
+                                        'planning_complete': True
+                                    }
+                                )
+                                continue  # Continue to allow handoff tool execution
+                            else:
+                                # Individual agent completed, but supervisor workflow not fully complete
+                                yield AgentResponse(
+                                    response_type='text',
+                                    is_task_complete=False,
+                                    require_user_input=False,
+                                    content=f'Agent completed - continuing supervisor workflow...',
+                                    metadata={
+                                        'session_id': context_id,
+                                        'task_id': task_id,
+                                        'agent_name': self.name,
+                                        'step_count': step_count,
+                                        'status': 'agent_completed_workflow_continuing'
+                                    }
+                                )
+                                continue
+                        else:
+                            yield AgentResponse(
+                                response_type='text',
+                                is_task_complete=False,
+                                require_user_input=False,
+                                content=f'Processing... Status: {status}',
+                                metadata={
+                                    'session_id': context_id,
+                                    'task_id': task_id,
+                                    'agent_name': self.name,
+                                    'step_count': step_count,
+                                    'status': 'working'
+                                }
+                            )
                     else:
+                        # Default processing response
                         yield AgentResponse(
                             response_type='text',
                             is_task_complete=False,
                             require_user_input=False,
-                            content=f'Processing... Status: {status}',
+                            content='Processing...',
                             metadata={
                                 'session_id': context_id,
                                 'task_id': task_id,
@@ -672,22 +1093,41 @@ class CustomSupervisorAgent(BaseAgent):
                                 'status': 'working'
                             }
                         )
-                else:
-                    # Default processing response
-                    yield AgentResponse(
-                        response_type='text',
-                        is_task_complete=False,
-                        require_user_input=False,
-                        content='Processing...',
-                        metadata={
-                            'session_id': context_id,
-                            'task_id': task_id,
-                            'agent_name': self.name,
-                            'step_count': step_count,
-                            'status': 'working'
-                        }
-                    )
                     
+        except TypeError as e:
+            # Handle specific NoneType iteration error from langgraph-supervisor handoff
+            if "'NoneType' object is not iterable" in str(e):
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Normal stream termination after handoff - NoneType iteration detected",
+                    task_id=task_id,
+                    context_id=context_id,
+                    extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "thread_id": thread_id,
+                        "step_count": step_count,
+                        "note": "This is expected behavior when subgraph handoff completes"
+                    }
+                )
+                # Return a completion response instead of error
+                yield AgentResponse(
+                    response_type='data',
+                    is_task_complete=True,
+                    require_user_input=False,
+                    content={'status': 'completed', 'message': 'Workflow completed successfully'},
+                    metadata={
+                        'session_id': context_id,
+                        'task_id': task_id,
+                        'agent_name': self.name,
+                        'step_count': step_count,
+                        'status': 'completed'
+                    }
+                )
+                return
+            else:
+                # Re-raise other TypeError exceptions
+                raise
         except Exception as e:
             supervisor_logger.log_structured(
                 level="ERROR",
@@ -711,22 +1151,22 @@ class CustomSupervisorAgent(BaseAgent):
                     'session_id': context_id,
                     'task_id': task_id,
                     'agent_name': self.name,
-                    'error_type': type(e).__name__,
-                    'step_count': step_count
+                    'step_count': step_count,
+                    'status': 'error'
                 }
             )
         
-        supervisor_logger.log_structured(
-            level="INFO",
-            message=f"[stream] END",
-            task_id=task_id,
-            context_id=context_id,
-            extra={
-                "agent_name": self.__class__.__name__,
-                "thread_id": thread_id,
-                "step_count": step_count
-            }
-        )
+            supervisor_logger.log_structured(
+                level="INFO",
+                message=f"[stream] END",
+                task_id=task_id,
+                context_id=context_id,
+                extra={
+                    "agent_name": self.__class__.__name__,
+                    "thread_id": thread_id,
+                    "step_count": step_count
+                }
+            )
     
     
     def _is_agent_return(self, item: Dict[str, Any]) -> bool:
@@ -951,6 +1391,330 @@ class CustomSupervisorAgent(BaseAgent):
             "agent_count": len(self.agents),
             "ready": self.is_ready()
         }
+
+    def _validate_all_agents_completion(self, item: dict) -> bool:
+        """
+        Validate that ALL agents in the supervisor have completed their individual flows.
+        Only return True when the entire supervisor workflow is complete.
+        
+        Args:
+            item: The state update from any agent in the supervisor
+            
+        Returns:
+            bool: True if ALL agents have completed their flows, False otherwise
+        """
+        try:
+            # Check if this is a handoff tool execution (final completion signal)
+            if 'planner_data' in item and item.get('planner_data'):
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Handoff tool executed - supervisor workflow complete",
+                    extra={
+                        "has_planner_data": True,
+                        "planner_data_keys": list(item.get('planner_data', {}).keys()),
+                        "validation_result": "PASS"
+                    }
+                )
+                return True
+            
+            # Get list of attached agents from supervisor configuration
+            attached_agents = self._get_attached_agents()
+            
+            # Validate each agent type individually
+            agent_completion_status = {}
+            agent_status_data = {}
+            for agent_type in attached_agents:
+                if agent_type == "planner":
+                    is_complete, planning_status = self._validate_planner_agent_completion(item)
+                    agent_completion_status["planner"] = is_complete
+                    agent_status_data["planner"] = planning_status
+                elif agent_type == "generator":
+                    agent_completion_status["generator"] = self._validate_generator_agent_completion(item)
+                    agent_status_data["generator"] = {}
+                elif agent_type == "validator":
+                    agent_completion_status["validator"] = self._validate_validator_agent_completion(item)
+                    agent_status_data["validator"] = {}
+                elif agent_type == "editor":
+                    agent_completion_status["editor"] = self._validate_editor_agent_completion(item)
+                    agent_status_data["editor"] = {}
+                # Add more agent types as needed
+            
+            # Check if ALL agents are completed
+            all_agents_completed = all(agent_completion_status.values())
+            
+            supervisor_logger.log_structured(
+                level="INFO",
+                message="Multi-agent completion validation",
+                extra={
+                    "attached_agents": attached_agents,
+                    "agent_completion_status": agent_completion_status,
+                    "agent_status_data_keys": {agent: list(data.keys()) for agent, data in agent_status_data.items()},
+                    "all_agents_completed": all_agents_completed,
+                    "validation_result": "PASS" if all_agents_completed else "CONTINUE"
+                }
+            )
+            
+            return all_agents_completed
+            
+        except Exception as e:
+            supervisor_logger.log_structured(
+                level="ERROR",
+                message=f"Error validating all agents completion: {e}",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "item_keys": list(item.keys()) if isinstance(item, dict) else "not_dict"
+                }
+            )
+            return False
+
+    def _get_attached_agents(self) -> List[str]:
+        """
+        Get list of agent types attached to this supervisor.
+        
+        Returns:
+            List of agent type names
+        """
+        # For now, we know we have planner agent
+        # In the future, this could be dynamically determined from self.agents
+        return ["planner"]  # Add more as needed: ["planner", "generator", "validator", "editor"]
+
+    def _validate_planner_agent_completion(self, item: dict) -> tuple[bool, dict]:
+        """
+        Validate that the planner agent has completed all its required phases.
+        
+        Args:
+            item: The state update from the supervisor
+            
+        Returns:
+            tuple: (is_complete, planning_status) where is_complete is bool and planning_status contains all planning information
+        """
+        try:
+            planning_state = item.get('planning_workflow_state')
+            if not planning_state:
+                supervisor_logger.log_structured(
+                    level="WARNING",
+                    message="No planning_workflow_state found for planner validation",
+                    extra={"item_keys": list(item.keys()) if isinstance(item, dict) else "not_dict"}
+                )
+                return False, {}
+            
+            # Extract completion flags
+            if hasattr(planning_state, 'requirements_complete'):
+                requirements_complete = planning_state.requirements_complete
+                execution_complete = planning_state.execution_complete
+                planning_complete = planning_state.planning_complete
+                error_occurred = planning_state.error_occurred
+            elif isinstance(planning_state, dict):
+                requirements_complete = planning_state.get('requirements_complete', False)
+                execution_complete = planning_state.get('execution_complete', False)
+                planning_complete = planning_state.get('planning_complete', False)
+                error_occurred = planning_state.get('error_occurred', False)
+            else:
+                supervisor_logger.log_structured(
+                    level="WARNING",
+                    message="Unexpected planning_workflow_state type for planner validation",
+                    extra={"planning_state_type": type(planning_state).__name__}
+                )
+                return False, {}
+            
+            # Check all required planner phases are complete
+            planner_completion_metrics = {
+                'requirements_complete': requirements_complete,
+                'execution_complete': execution_complete,
+                'planning_complete': planning_complete,
+                'no_errors': not error_occurred
+            }
+            
+            # All planner phases must be complete and no errors
+            planner_phases_complete = all(planner_completion_metrics.values())
+            
+            # If phases are complete, also validate that we have the corresponding data
+            if planner_phases_complete:
+                data_validation, data_values = self._validate_planner_data_availability(item)
+                if not data_validation:
+                    supervisor_logger.log_structured(
+                        level="WARNING",
+                        message="All planner phases completed but missing corresponding data",
+                        extra={
+                            "planner_completion_metrics": planner_completion_metrics,
+                            "data_validation_failed": True,
+                            "available_data_keys": list(data_values.keys())
+                        }
+                    )
+                    return False, {}
+                
+                # Store the actual data values for later use
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Planner data validation successful - data values available",
+                    extra={
+                        "planner_completion_metrics": planner_completion_metrics,
+                        "data_validation_passed": True,
+                        "available_data_keys": list(data_values.keys()),
+                        "data_values_preview": {
+                            key: str(value)[:100] + "..." if len(str(value)) > 100 else str(value)
+                            for key, value in data_values.items()
+                        }
+                    }
+                )
+            
+            # Prepare comprehensive planning status
+            planning_status = {
+                "completion_metrics": planner_completion_metrics,
+                "phases_complete": planner_phases_complete,
+                "planning_state": planning_state,
+                "data_values": data_values if planner_phases_complete else {},
+                "validation_result": "PASS" if planner_phases_complete else "CONTINUE"
+            }
+            
+            supervisor_logger.log_structured(
+                level="INFO",
+                message="Planner agent completion validation",
+                extra={
+                    "planner_completion_metrics": planner_completion_metrics,
+                    "planner_phases_complete": planner_phases_complete,
+                    "planner_fully_complete": planner_phases_complete,
+                    "validation_result": "PASS" if planner_phases_complete else "CONTINUE",
+                    "planning_status_keys": list(planning_status.keys())
+                }
+            )
+            
+            return planner_phases_complete, planning_status
+            
+        except Exception as e:
+            supervisor_logger.log_structured(
+                level="ERROR",
+                message=f"Error validating planner agent completion: {e}",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "item_keys": list(item.keys()) if isinstance(item, dict) else "not_dict"
+                }
+            )
+            return False, {}
+
+    def _validate_planner_data_availability(self, item: dict) -> tuple[bool, dict]:
+        """
+        Validate that all required planner data is available when phases are completed.
+        
+        Args:
+            item: The state update from the planner sub-supervisor
+            
+        Returns:
+            tuple: (is_valid, data_dict) where is_valid is bool and data_dict contains the actual data values
+        """
+        try:
+            # Extract planning workflow state
+            planning_state = item.get('planning_workflow_state')
+            if not planning_state:
+                supervisor_logger.log_structured(
+                    level="WARNING",
+                    message="No planning_workflow_state found for data validation",
+                    extra={"item_keys": list(item.keys()) if isinstance(item, dict) else "not_dict"}
+                )
+                return False, {}
+            
+            # Extract actual data values - check both top level and planning_state
+            data_values = {}
+            missing_data = []
+            
+            # Get requirements_data - check top level first, then planning_state
+            requirements_data = None
+            if 'requirements_data' in item and item['requirements_data'] is not None and item['requirements_data'] != "":
+                requirements_data = item['requirements_data']
+            elif hasattr(planning_state, 'requirements_data'):
+                requirements_data = getattr(planning_state, 'requirements_data')
+            elif isinstance(planning_state, dict) and 'requirements_data' in planning_state:
+                requirements_data = planning_state['requirements_data']
+            
+            if requirements_data is not None and requirements_data != "":
+                data_values['requirements_data'] = requirements_data
+            else:
+                missing_data.append('requirements_data')
+            
+            # Get execution_data - check top level first, then planning_state
+            execution_data = None
+            if 'execution_data' in item and item['execution_data'] is not None and item['execution_data'] != "":
+                execution_data = item['execution_data']
+            elif hasattr(planning_state, 'execution_data'):
+                execution_data = getattr(planning_state, 'execution_data')
+            elif isinstance(planning_state, dict) and 'execution_data' in planning_state:
+                execution_data = planning_state['execution_data']
+            
+            if execution_data is not None and execution_data != "":
+                data_values['execution_data'] = execution_data
+            else:
+                missing_data.append('execution_data')
+            
+            # Log data availability with actual values
+            supervisor_logger.log_structured(
+                level="INFO",
+                message="Planner data availability validation",
+                extra={
+                    "available_data_keys": list(data_values.keys()),
+                    "missing_data": missing_data,
+                    "all_data_available": len(missing_data) == 0,
+                    "data_values_preview": {
+                        key: str(value)[:100] + "..." if len(str(value)) > 100 else str(value)
+                        for key, value in data_values.items()
+                    }
+                }
+            )
+            
+            # Return validation result and actual data values
+            is_valid = len(missing_data) == 0
+            return is_valid, data_values
+            
+        except Exception as e:
+            supervisor_logger.log_structured(
+                level="ERROR",
+                message="Error validating planner data availability",
+                extra={"error": str(e), "error_type": type(e).__name__}
+            )
+            return False, {}
+
+    def _validate_generator_agent_completion(self, item: dict) -> bool:
+        """
+        Validate that the generator agent has completed its work.
+        
+        Args:
+            item: The state update from the supervisor
+            
+        Returns:
+            bool: True if generator agent is complete, False otherwise
+        """
+        # TODO: Implement generator agent completion validation
+        # For now, return True as we don't have generator agent yet
+        return True
+
+    def _validate_validator_agent_completion(self, item: dict) -> bool:
+        """
+        Validate that the validator agent has completed its work.
+        
+        Args:
+            item: The state update from the supervisor
+            
+        Returns:
+            bool: True if validator agent is complete, False otherwise
+        """
+        # TODO: Implement validator agent completion validation
+        # For now, return True as we don't have validator agent yet
+        return True
+
+    def _validate_editor_agent_completion(self, item: dict) -> bool:
+        """
+        Validate that the editor agent has completed its work.
+        
+        Args:
+            item: The state update from the supervisor
+            
+        Returns:
+            bool: True if editor agent is complete, False otherwise
+        """
+        # TODO: Implement editor agent completion validation
+        # For now, return True as we don't have editor agent yet
+        return True
 
 
 # Factory function for easy supervisor creation

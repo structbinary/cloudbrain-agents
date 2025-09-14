@@ -135,8 +135,8 @@ class PlannerSupervisorState(BaseModel):
         description="Message history for langgraph-supervisor LLM input"
     )
     
-    # Workflow state
-    workflow_state: PlanningWorkflowState = Field(
+    # Planning workflow state - renamed to avoid conflict with supervisor's workflow_state
+    planning_workflow_state: PlanningWorkflowState = Field(
         default_factory=PlanningWorkflowState,
         description="Current state of the planning workflow"
     )
@@ -205,38 +205,38 @@ class PlannerSupervisorState(BaseModel):
     def validate_completion_state(self):
         """Validate completion state consistency and loop prevention."""
         # Check loop counter limits
-        if self.workflow_state.loop_counter > 10:
+        if self.planning_workflow_state.loop_counter > 10:
             self.error = "Maximum iterations reached (10)"
             self.status = "error"
             return self
         
         # Validate phase consistency
-        if self.workflow_state.planning_complete and not self.workflow_state.is_complete:
+        if self.planning_workflow_state.planning_complete and not self.planning_workflow_state.is_complete:
             self.error = "Planning marked complete but not all phases are done"
             self.status = "error"
             return self
         
         # Validate current phase matches completion status
-        expected_phase = self.workflow_state.next_phase
-        if expected_phase and self.workflow_state.current_phase != expected_phase:
+        expected_phase = self.planning_workflow_state.next_phase
+        if expected_phase and self.planning_workflow_state.current_phase != expected_phase:
             # Auto-correct phase if possible
-            self.workflow_state.current_phase = expected_phase
+            self.planning_workflow_state.current_phase = expected_phase
         
         return self
     
     def increment_loop_counter(self) -> None:
         """Increment loop counter and check for limits."""
-        self.workflow_state.increment_loop_counter()
-        if self.workflow_state.error_occurred:
-            self.error = self.workflow_state.error_message
+        self.planning_workflow_state.increment_loop_counter()
+        if self.planning_workflow_state.error_occurred:
+            self.error = self.planning_workflow_state.error_message
             self.status = "error"
     
     def set_phase_complete(self, phase: str) -> None:
         """Mark a specific phase as complete and update state."""
-        self.workflow_state.set_phase_complete(phase)
+        self.planning_workflow_state.set_phase_complete(phase)
         
         # Update status based on completion
-        if self.workflow_state.planning_complete:
+        if self.planning_workflow_state.planning_complete:
             self.status = "completed"
         else:
             self.status = "in_progress"
@@ -247,9 +247,9 @@ class PlannerSupervisorState(BaseModel):
             message=f"Phase {phase} marked complete",
             extra={
                 "phase": phase,
-                "current_phase": self.workflow_state.current_phase,
-                "planning_complete": self.workflow_state.planning_complete,
-                "loop_counter": self.workflow_state.loop_counter
+                "current_phase": self.planning_workflow_state.current_phase,
+                "planning_complete": self.planning_workflow_state.planning_complete,
+                "loop_counter": self.planning_workflow_state.loop_counter
             }
         )
 
@@ -273,7 +273,7 @@ def create_initial_planner_state(
         user_request=user_request,
         session_id=session_id,
         task_id=task_id,
-        workflow_state=PlanningWorkflowState(current_phase="requirements_analysis"),
+        planning_workflow_state=PlanningWorkflowState(current_phase="requirements_analysis"),
         planning_context="Initial planning phase started",
         status="pending"
     )
@@ -294,33 +294,33 @@ def update_planning_context(
     Returns:
         Updated planner state
     """
-    # Update workflow state
-    workflow_state = state.workflow_state.copy()
-    workflow_state.current_phase = phase
+    # Update planning workflow state
+    planning_workflow_state = state.planning_workflow_state.copy()
+    planning_workflow_state.current_phase = phase
     
     if phase == "requirements":
-        workflow_state.requirements_complete = True
+        planning_workflow_state.requirements_complete = True
     elif phase == "tf_security_n_best_practices_evaluator":
-        workflow_state.tf_security_n_best_practices_evaluator_complete = True
+        planning_workflow_state.security_n_best_practices_evaluator_complete = True
     elif phase == "execution":
-        workflow_state.execution_complete = True
+        planning_workflow_state.execution_complete = True
     elif phase == "complete":
-        workflow_state.planning_complete = True
+        planning_workflow_state.planning_complete = True
     
     # Update planning context
-    planning_context = state.planning_context.copy()
+    planning_context = state.planning_context.copy() if state.planning_context else {}
     planning_context["planning_phase"] = phase
-    planning_context["requirements_complete"] = workflow_state.requirements_complete
-    planning_context["tf_security_n_best_practices_evaluator_complete"] = workflow_state.tf_security_n_best_practices_evaluator_complete
-    planning_context["execution_complete"] = workflow_state.execution_complete
-    planning_context["planning_complete"] = workflow_state.planning_complete
+    planning_context["requirements_complete"] = planning_workflow_state.requirements_complete
+    planning_context["security_n_best_practices_evaluator_complete"] = planning_workflow_state.security_n_best_practices_evaluator_complete
+    planning_context["execution_complete"] = planning_workflow_state.execution_complete
+    planning_context["planning_complete"] = planning_workflow_state.planning_complete
     
     if data:
         planning_context.update(data)
     
     # Create updated state
     updated_state = state.copy()
-    updated_state.workflow_state = workflow_state
+    updated_state.planning_workflow_state = planning_workflow_state
     updated_state.planning_context = planning_context
     
     return updated_state

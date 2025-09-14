@@ -28,6 +28,7 @@ dependencies = [
     "langchain-mcp-adapters>=0.1.9",
     "langchain-tavily>=0.2.11",
     "json-repair>=0.50.1",
+    "langgraph-swarm>=0.0.13",
 ]
 
 [project.scripts]

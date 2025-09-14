@@ -125,7 +125,7 @@ class ModuleStructurePlanResponse(BaseModel):
 
 class ModuleStructurePlanResponseList(BaseModel):
     """Complete planning response for a Terraform module React agent structure"""
-    module_structure_plan_responses: List[ModuleStructurePlanResponse] = Field(
+    module_structure_plans: List[ModuleStructurePlanResponse] = Field(
         ..., 
         description="List of planning details for the module"
     )
@@ -349,7 +349,6 @@ class ResourceConfiguration(BaseModel):
     lifecycle_rules: Optional[Dict[str, Any]] = Field(None, description="Lifecycle configuration")
     tags_strategy: Optional[str] = Field(default="", description="Tagging strategy")
     parameter_justification: str = Field(default="", description="Justification for parameters")
-    description: str = Field(default="", description="Resource purpose")
 
 
 class TerraformFile(BaseModel):
@@ -360,12 +359,12 @@ class TerraformFile(BaseModel):
     dependencies: List[str] = Field(default_factory=list, description="File dependencies")
     organization_rationale: str = Field(default="", description="Rationale for file organization")
     # Keep original fields for backward compatibility
-    filename: str = Field(default="", description="Filename (e.g., main.tf)")
-    purpose: str = Field(default="", description="File purpose")
-    content_sections: List[str] = Field(default_factory=list, description="Ordered list of content sections")
-    includes_resources: List[str] = Field(default_factory=list, description="Resources defined in this file")
-    includes_variables: List[str] = Field(default_factory=list, description="Variables defined in this file")
-    includes_outputs: List[str] = Field(default_factory=list, description="Outputs defined in this file")
+    # filename: str = Field(default="", description="Filename (e.g., main.tf)")
+    # purpose: str = Field(default="", description="File purpose")
+    # content_sections: List[str] = Field(default_factory=list, description="Ordered list of content sections")
+    # includes_resources: List[str] = Field(default_factory=list, description="Resources defined in this file")
+    # includes_variables: List[str] = Field(default_factory=list, description="Variables defined in this file")
+    # includes_outputs: List[str] = Field(default_factory=list, description="Outputs defined in this file")
 
 class ModuleExample(BaseModel):
     """Module usage example"""
@@ -375,8 +374,8 @@ class ModuleExample(BaseModel):
     expected_outputs: List[str] = Field(default_factory=list, description="Expected outputs from this example")
     use_case: str = Field(default="", description="Use case description")
     # Keep original fields for backward compatibility
-    module_call: str = Field(default="", description="Complete module block code")
-    required_variables: Dict[str, Any] = Field(default_factory=dict, description="Required variable values")
+    # module_call: str = Field(default="", description="Complete module block code")
+    # required_variables: Dict[str, Any] = Field(default_factory=dict, description="Required variable values")
 
 class ComprehensiveExecutionPlanResponse(BaseModel):
     """Complete execution plan with full module specification"""
@@ -405,15 +404,15 @@ class ComprehensiveExecutionPlanResponse(BaseModel):
     
     # Deployment and operational details
     resource_dependencies: List[Dict[str, Any]] = Field(default_factory=list, description="Resource dependency graph")
-    deployment_phases: List[Dict[str, Any]] = Field(default_factory=list, description="Deployment phases")
+    deployment_phases: List[str] = Field(default_factory=list, description="Deployment phases")
     estimated_costs: Dict[str, Any] = Field(default_factory=dict, description="Cost estimates by resource type")
-    security_considerations: List[str] = Field(default_factory=list, description="Security considerations and warnings")
+    # security_considerations: List[str] = Field(default_factory=list, description="Security considerations and warnings")
     
     # Testing and validation
     validation_and_testing: List[str] = Field(default_factory=list, description="Built-in validation rules and testing approaches")
-    validation_rules: List[str] = Field(default_factory=list, description="Built-in validation rules")
-    testing_strategy: List[str] = Field(default_factory=list, description="Recommended testing approaches")
-    compliance_checks: List[str] = Field(default_factory=list, description="Compliance validations built into module")
+    # validation_rules: List[str] = Field(default_factory=list, description="Built-in validation rules")
+    # testing_strategy: List[str] = Field(default_factory=list, description="Recommended testing approaches")
+    # compliance_checks: List[str] = Field(default_factory=list, description="Compliance validations built into module")
     
     # Error handling
     error: Optional[str] = Field(None, description="Error message if execution plan creation failed")
@@ -1105,10 +1104,10 @@ async def create_execution_plan(state_mgmt_plan: StateManagementPlannerResponse)
         configuration_optimizer_data = _shared_planner_state.execution_data.configuration_optimizer_data
         
         # Validate required planning data exists
-        if not module_structure_plan:
+        if not module_structure_plan or not isinstance(module_structure_plan, dict) or not module_structure_plan.get("module_structure_plans"):
             raise ValueError("Module structure plan not available. Run create_module_structure_plan first.")
         
-        if not configuration_optimizer_data:
+        if not configuration_optimizer_data or not isinstance(configuration_optimizer_data, dict) or not configuration_optimizer_data.get("configuration_optimizers"):
             raise ValueError("Configuration optimizer data not available. Run create_configuration_optimization first.")
         
         # Extract service name from state management plan
@@ -1125,7 +1124,9 @@ async def create_execution_plan(state_mgmt_plan: StateManagementPlannerResponse)
         
         # Find matching module structure plan for the service
         matching_module_plan = None
-        for plan in module_structure_plan:
+        # Extract the list from the dict structure
+        module_plans_list = module_structure_plan.get("module_structure_plans", []) if isinstance(module_structure_plan, dict) else module_structure_plan
+        for plan in module_plans_list:
             if isinstance(plan, dict) and plan.get("service_name") == target_service_name:
                 matching_module_plan = plan
                 break
@@ -1145,7 +1146,9 @@ async def create_execution_plan(state_mgmt_plan: StateManagementPlannerResponse)
         
         # Find matching configuration optimizer data for the service
         matching_config_optimizer = None
-        for config in configuration_optimizer_data:
+        # Extract the list from the dict structure
+        config_optimizer_list = configuration_optimizer_data.get("configuration_optimizers", []) if isinstance(configuration_optimizer_data, dict) else configuration_optimizer_data
+        for config in config_optimizer_list:
             if isinstance(config, dict) and config.get("service_name") == target_service_name:
                 matching_config_optimizer = config
                 break
@@ -1333,7 +1336,9 @@ async def create_module_structure_plan_tool() -> ModuleStructurePlanResponseList
                 ))
         
     
-        _shared_planner_state.execution_data.module_structure_plan = [result.dict() for result in results]
+        # Wrap list in dict to match Pydantic model expectations
+        module_structure_plans_list = [result.dict() for result in results]
+        _shared_planner_state.execution_data.module_structure_plan = {"module_structure_plans": module_structure_plans_list}
         _shared_planner_state.execution_data.module_structure_plan_complete = True
         
         # Mark module structure planning as complete
@@ -1344,7 +1349,7 @@ async def create_module_structure_plan_tool() -> ModuleStructurePlanResponseList
             message="Multi-service module structure planning completed",
             extra={"total_services": len(service_list), "successful_plans": len(results), "sequence_step_complete": "module_structure"}
         )
-        return ModuleStructurePlanResponseList(module_structure_plan_responses=results)
+        return ModuleStructurePlanResponseList(module_structure_plans=results)
 
     except Exception as e:
         execution_logger.log_structured(
@@ -1352,7 +1357,7 @@ async def create_module_structure_plan_tool() -> ModuleStructurePlanResponseList
             message=f"Failed to create module structure plan for all services",
             extra={"error": str(e)}
         )
-        return ModuleStructurePlanResponseList(module_structure_plan_responses=[ModuleStructurePlanResponse(
+        return ModuleStructurePlanResponseList(module_structure_plans=[ModuleStructurePlanResponse(
             service_name=service,
             recommended_files=[],
             variable_definitions=[],
@@ -1421,7 +1426,12 @@ async def create_configuration_optimizations_tool(module_plans: str) -> Configur
             )
             # Try to extract data from shared state as fallback
             if _shared_planner_state and _shared_planner_state.execution_data.module_structure_plan:
-                module_plans = _shared_planner_state.execution_data.module_structure_plan
+                module_structure_data = _shared_planner_state.execution_data.module_structure_plan
+                # Extract list from dict structure
+                if isinstance(module_structure_data, dict) and "module_structure_plans" in module_structure_data:
+                    module_plans = module_structure_data["module_structure_plans"]
+                else:
+                    module_plans = module_structure_data  # Fallback for old format
                 execution_logger.log_structured(
                     level="INFO",
                     message="Using module structure plan from shared state as fallback",
@@ -1468,7 +1478,9 @@ async def create_configuration_optimizations_tool(module_plans: str) -> Configur
             results.append(error_result)
     
     # Update shared planner state
-    _shared_planner_state.execution_data.configuration_optimizer_data = [result.dict() for result in results]
+    # Wrap list in dict to match Pydantic model expectations
+    configuration_optimizer_list = [result.dict() for result in results]
+    _shared_planner_state.execution_data.configuration_optimizer_data = {"configuration_optimizers": configuration_optimizer_list}
     _shared_planner_state.execution_data.configuration_optimizer_complete = True
     
     # Mark configuration optimization as complete
@@ -1535,7 +1547,12 @@ async def create_state_management_plans_tool(optimizations: str) -> StateManagem
             )
             # Try to extract data from shared state as fallback
             if _shared_planner_state and _shared_planner_state.execution_data.configuration_optimizer_data:
-                optimizations = _shared_planner_state.execution_data.configuration_optimizer_data
+                configuration_data = _shared_planner_state.execution_data.configuration_optimizer_data
+                # Extract list from dict structure
+                if isinstance(configuration_data, dict) and "configuration_optimizers" in configuration_data:
+                    optimizations = configuration_data["configuration_optimizers"]
+                else:
+                    optimizations = configuration_data  # Fallback for old format
                 execution_logger.log_structured(
                     level="INFO",
                     message="Using configuration optimizer data from shared state as fallback",
@@ -1609,7 +1626,9 @@ async def create_state_management_plans_tool(optimizations: str) -> StateManagem
     
     # Update shared planner state
 
-    _shared_planner_state.execution_data.state_management_data = [result.dict() for result in results]
+    # Wrap list in dict to match Pydantic model expectations
+    state_management_list = [result.dict() for result in results]
+    _shared_planner_state.execution_data.state_management_data = {"state_management_plans": state_management_list}
     _shared_planner_state.execution_data.state_management_complete = True
     
     # Mark state management planning as complete
@@ -1674,7 +1693,12 @@ async def create_execution_plan_tool(state_mgmt_plans: str) -> ExecutionPlanResp
             )
             # Try to extract data from shared state as fallback
             if _shared_planner_state and _shared_planner_state.execution_data.state_management_data:
-                state_mgmt_plans = _shared_planner_state.execution_data.state_management_data
+                state_management_data = _shared_planner_state.execution_data.state_management_data
+                # Extract list from dict structure
+                if isinstance(state_management_data, dict) and "state_management_plans" in state_management_data:
+                    state_mgmt_plans = state_management_data["state_management_plans"]
+                else:
+                    state_mgmt_plans = state_management_data  # Fallback for old format
                 execution_logger.log_structured(
                     level="INFO",
                     message="Using state management data from shared state as fallback",
@@ -1747,9 +1771,15 @@ async def create_execution_plan_tool(state_mgmt_plans: str) -> ExecutionPlanResp
         status="completed"
     )
 
-    _shared_planner_state.execution_data.execution_plan_data = [result.model_dump() for result in results]
+    # Wrap list in dict to match Pydantic model expectations
+    execution_plans_list = [result.model_dump() for result in results]
+    _shared_planner_state.execution_data.execution_plan_data = {"execution_plans": execution_plans_list}
     _shared_planner_state.execution_data.execution_plan_complete = True
     _shared_planner_state.execution_data.agent_completion = completion_data
+    
+    # CRITICAL: Mark execution planning as complete in the workflow state
+    # This is what the supervisor checks to determine if execution is complete
+    _shared_planner_state.planning_workflow_state.execution_complete = True
     
     # Mark execution planning as complete
     _execution_sequence["execution_plan_complete"] = True
@@ -1844,7 +1874,7 @@ def create_execution_planner_react_agent(state: PlannerSupervisorState, config: 
                 create_execution_plan_tool
             ],
             name="execution_planner",
-            checkpointer=None,  # Disable checkpointing to ensure sequential execution
+            checkpointer=state.memory if hasattr(state, 'memory') else None,  # Use shared memory for proper state management
             prompt=ChatPromptTemplate.from_messages([
                 ("system", """
 You are an expert Terraform Execution Planner focused on comprehensive infrastructure planning and module generation specifications.
