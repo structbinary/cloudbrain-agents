@@ -615,13 +615,17 @@ The planner sub-supervisor has completed its work and is returning control."""
                 extra={"error": str(e), "error_type": type(e).__name__}
             )
     
-    def _is_planner_complete(self, planner_data: Dict[str, Any]) -> bool:
+    def _is_planner_complete(self, planner_data) -> bool:
         """Check if planner phase is complete."""
         if not planner_data:
             return False
         
         # Use the explicit completion flag from planner
-        return planner_data.get("planning_complete", False)
+        # Handle both dict and PlannerData object
+        if hasattr(planner_data, 'planning_complete'):
+            return planner_data.planning_complete
+        else:
+            return planner_data.get("planning_complete", False)
     
     def _is_generation_complete(self, generation_data: Dict[str, Any]) -> bool:
         """Check if generation phase is complete."""
@@ -724,9 +728,17 @@ The planner sub-supervisor has completed its work and is returning control."""
                 # Extract planner_data from the agent state
                 planner_data = agent_state.get("planner_data", {})
                 
+                # Handle both dict and PlannerData object
+                if hasattr(planner_data, 'model_dump'):
+                    # It's a PlannerData object, convert to dict for compatibility
+                    planner_data_dict = planner_data.model_dump()
+                else:
+                    # It's already a dict
+                    planner_data_dict = planner_data
+                
                 supervisor_updates = {
                     "messages": agent_state.get("messages", []),
-                    "planner_data": planner_data,
+                    "planner_data": planner_data_dict,  # Use dict version for compatibility
                     "status": WorkflowStatus.IN_PROGRESS,  # Keep workflow in progress to continue to next agent
                     "current_agent": None,  # Planning is complete, supervisor will determine next agent
                 }

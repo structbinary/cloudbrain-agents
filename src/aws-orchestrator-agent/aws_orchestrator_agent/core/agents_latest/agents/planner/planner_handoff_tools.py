@@ -12,7 +12,7 @@ from typing import Annotated, Dict, Any, Optional
 from datetime import datetime
 from langchain_core.tools import tool, BaseTool, InjectedToolCallId
 from langchain_core.messages import ToolMessage, HumanMessage
-from langgraph.types import Command
+from langgraph.types import Command, Send
 from langgraph.graph import END
 from langgraph.prebuilt import InjectedState
 from langgraph_supervisor.handoff import METADATA_KEY_HANDOFF_DESTINATION
@@ -63,7 +63,7 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
         messages = getattr(state, "messages", [])
         return Command(
             goto=agent_name,
-            # graph=Command.PARENT,
+            graph=Command.PARENT,
             # NOTE: this is a state update that will be applied to the swarm multi-agent graph (i.e., the PARENT graph)
             update={
                 "messages": messages + [tool_message],
@@ -138,26 +138,51 @@ def create_mark_planning_complete() -> BaseTool:
             # Create completion message for llm_input_messages
             completion_message = HumanMessage(content=f"Planning marked as complete: {task_description}. Now calling handoff_to_planner_complete to return to main supervisor.")
             
-            # Create tool message
-            tool_message = ToolMessage(
-                content=f"Planning marked as complete: {task_description}",
+            # Create tool message            
+            # Access messages directly from state
+            messages = getattr(state, "messages", [])
+            requirements_data = getattr(state, "requirements_data", None)
+            execution_data = getattr(state, "execution_data", None)
+            planning_results = getattr(state, "planning_results", None)
+        
+            # Create planner_data structure that Supervisor expects
+            # Ensure all data is properly serialized to plain dicts
+            planner_data = {
+                "requirements_data": requirements_data.model_dump() if hasattr(requirements_data, 'model_dump') else (requirements_data if requirements_data else {}),
+                "execution_data": execution_data.model_dump() if hasattr(execution_data, 'model_dump') else (execution_data if execution_data else {}),
+                "planning_results": planning_results.model_dump() if hasattr(planning_results, 'model_dump') else (planning_results if planning_results else {}),
+                "planning_complete": True,
+                "completion_timestamp": getattr(state, "completion_timestamp", None)
+            }
+
+            # tool_message = ToolMessage(
+            #     content=f"Planning marked as complete: {task_description}",
+            #     name="mark_planning_complete",
+            #     tool_call_id=tool_call_id,
+            # )
+
+            ## Facing handoff issue so using the message history itself to pass the planner data back to supervisor.
+
+            planner_result = ToolMessage(
+                content=f"{planner_data}",
                 name="mark_planning_complete",
                 tool_call_id=tool_call_id,
             )
-            
-            # Access messages directly from state
-            messages = getattr(state, "messages", [])
-            
+
             # Create the command with state updates
             command = Command(
                 goto="planner_sub_supervisor",  # Stay in current graph
                 graph=Command.PARENT,
                 update={
-                    "messages": messages + [tool_message],
+                    "messages": messages + [planner_result],
                     "llm_input_messages": [completion_message],
                     "completion_emitted": True,   # Mark completion as emitted
-                    "completion_lock": False,     # Release any locks
-                },
+                    "completion_lock": False     # Release any locks
+                    # "planner_data": planner_data,  # Pass planning data to Supervisor
+                    # "workflow_state": {
+                    #     "planning_complete": True  # CRITICAL: Set completion flag in workflow_state
+                    # }
+                }
             )
             
             planner_supervisor_logger.log_structured(
@@ -187,7 +212,7 @@ def create_mark_planning_complete() -> BaseTool:
             # Return error command
             return Command(
                 goto="planner_sub_supervisor",
-                # graph=Command.PARENT,
+                graph=Command.PARENT,
                 update={
                     "messages": getattr(state, "messages", []) + [ToolMessage(
                         content=f"Error marking planning as complete: {str(e)}",

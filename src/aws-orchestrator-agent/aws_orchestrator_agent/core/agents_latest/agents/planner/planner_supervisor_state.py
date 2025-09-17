@@ -116,6 +116,14 @@ class PlanningResults(BaseModel):
     risk_level: str = Field(default="low", description="Overall risk level")
     summary: str = Field(default="", description="Planning summary")
 
+# class PlannerData(BaseModel):
+#     """Data from planner sub-supervisor."""
+#     requirements_data: Dict[str, Any] = Field(default_factory=dict, description="Requirements analysis results as serialized dict")
+#     execution_data: Dict[str, Any] = Field(default_factory=dict, description="Execution planning results as serialized dict")
+#     planning_results: Dict[str, Any] = Field(default_factory=dict, description="Planning results as serialized dict")
+#     planning_complete: bool = Field(default=False, description="Whether planning is complete")
+#     completion_timestamp: Optional[str] = Field(default=None, description="Timestamp when planning was completed")
+
 class PlannerSupervisorState(BaseModel):
     """State schema for the Planner Sub-Supervisor using langgraph-supervisor."""
     
@@ -210,6 +218,11 @@ class PlannerSupervisorState(BaseModel):
         default=False,
         description="Atomic lock for completion operations to prevent race conditions"
     )
+
+    # planner_data: Optional[PlannerData] = Field(
+    #     default=None,
+    #     description="Planning data from planner sub-supervisor"
+    # )
     
     @model_validator(mode='after')
     def validate_completion_state(self):
