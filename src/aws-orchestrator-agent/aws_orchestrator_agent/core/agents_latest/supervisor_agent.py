@@ -40,6 +40,7 @@ from .types import (
     SecurityState,
     CostState
 )
+from .agents.generator.generator_state import GeneratorStageState
 from .agents.base_agent import BaseSubgraphAgent
 from aws_orchestrator_agent.utils.logger import AgentLogger, log_sync, log_async
 from aws_orchestrator_agent.config.config import Config
@@ -207,7 +208,7 @@ class CustomSupervisorAgent(BaseAgent):
         WORKFLOW RULES:
         - For ANY infrastructure request (creating, writing, or generating Terraform modules), ALWAYS start by delegating to planner_sub_supervisor
         - The planner_sub_supervisor will analyze requirements and create execution plans
-        - After planning is complete (when you receive planner_data), IMMEDIATELY delegate to generation_agent to generate the actual Terraform code
+        - After planning is complete (when you receive planner_data), IMMEDIATELY delegate to generator_swarm to generate the actual Terraform code
         - Use validation_agent to validate the generated code if needed
         - Use editor_agent to modify existing configurations if requested
         
@@ -229,7 +230,7 @@ class CustomSupervisorAgent(BaseAgent):
         """Get description for an agent based on its name."""
         descriptions = {
             "planner_sub_supervisor": "Analyzes requirements and creates execution plans using specialized sub-agents",
-            "generation_agent": "Generates Terraform modules from scratch",
+            "generator_swarm": "Generates Terraform modules using coordinated swarm of specialized generator agents",
             "editor_agent": "Modifies existing Terraform configurations",
             "validation_agent": "Validates Terraform modules and configurations"
         }
@@ -331,8 +332,61 @@ class CustomSupervisorAgent(BaseAgent):
                 if self._should_continue_workflow(state):
                     self._prepare_next_phase(state)
                 
+                # CRITICAL: Add explicit completion context for LLM when planning is complete
+                if (state.workflow_state.planning_complete and 
+                    not state.workflow_state.generation_complete and
+                    state.current_agent is None):
+                    
+                    completion_context = f"""PLANNING PHASE COMPLETE:
+planning_complete = True
+current_phase = {state.workflow_state.current_phase}
+workflow_complete = {state.workflow_state.workflow_complete}
+
+MANDATORY ACTION: You MUST delegate to generator_swarm to generate the Terraform code.
+DO NOT delegate back to planner_sub_supervisor.
+The planning workflow is complete and you must proceed to the generation phase."""
+                    
+                    # Set explicit completion context for LLM
+                    state.llm_input_messages = [HumanMessage(content=completion_context)]
+                    
+                    supervisor_logger.log_structured(
+                        level="INFO",
+                        message="Added explicit completion context for LLM - planning complete",
+                        extra={
+                            "planning_complete": state.workflow_state.planning_complete,
+                            "current_phase": state.workflow_state.current_phase,
+                            "current_agent": state.current_agent
+                        }
+                    )
+                
+                # CRITICAL: Handle planner sub-supervisor completion handoff
+                elif (state.current_agent == "planner_sub_supervisor" and 
+                      state.workflow_state.planning_complete):
+                    
+                    completion_context = f"""PLANNER SUB-SUPERVISOR COMPLETION DETECTED:
+planning_complete = True
+current_agent = {state.current_agent}
+current_phase = {state.workflow_state.current_phase}
+
+MANDATORY ACTION: You MUST delegate to generator_swarm to generate the Terraform code.
+DO NOT delegate back to planner_sub_supervisor.
+The planner sub-supervisor has completed its work and is returning control."""
+                    
+                    # Set explicit completion context for LLM
+                    state.llm_input_messages = [HumanMessage(content=completion_context)]
+                    
+                    supervisor_logger.log_structured(
+                        level="INFO",
+                        message="Added explicit completion context for LLM - planner sub-supervisor completion",
+                        extra={
+                            "planning_complete": state.workflow_state.planning_complete,
+                            "current_agent": state.current_agent,
+                            "current_phase": state.workflow_state.current_phase
+                        }
+                    )
+                
                 # Ensure llm_input_messages is populated for langgraph-supervisor
-                if not state.llm_input_messages and state.messages:
+                elif not state.llm_input_messages and state.messages:
                     # Use the last human message as LLM input
                     for message in reversed(state.messages):
                         if hasattr(message, 'content') and message.content:
@@ -462,6 +516,7 @@ class CustomSupervisorAgent(BaseAgent):
         """Get agent type from agent name."""
         name_to_type = {
             "planner_sub_supervisor": AgentType.PLANNER,
+            "generator_swarm": AgentType.GENERATION,  # Generator swarm is also a generation agent
             "generation_agent": AgentType.GENERATION,
             "validation_agent": AgentType.VALIDATION,
             "editor_agent": AgentType.EDITOR,
@@ -496,7 +551,7 @@ class CustomSupervisorAgent(BaseAgent):
                 state.workflow_state.set_phase_complete("planning")
                 state.workflow_state.set_agent_handoff(
                     from_agent="planner_sub_supervisor",
-                    to_agent="generation_agent",
+                    to_agent="generator_swarm",
                     reason="Planning complete, proceeding to generation"
                 )
             
@@ -516,7 +571,7 @@ class CustomSupervisorAgent(BaseAgent):
                 
                 state.workflow_state.set_phase_complete("generation")
                 state.workflow_state.set_agent_handoff(
-                    from_agent="generation_agent",
+                    from_agent="generator_swarm",
                     to_agent=None,  # No next agent, workflow complete
                     reason="Generation complete, workflow finished"
                 )
@@ -565,12 +620,8 @@ class CustomSupervisorAgent(BaseAgent):
         if not planner_data:
             return False
         
-        # Check for execution plan data which indicates completion
-        execution_data = planner_data.get("execution_data", {})
-        execution_plan_data = execution_data.get("execution_plan_data", {})
-        execution_plans = execution_plan_data.get("execution_plans", [])
-        
-        return len(execution_plans) > 0
+        # Use the explicit completion flag from planner
+        return planner_data.get("planning_complete", False)
     
     def _is_generation_complete(self, generation_data: Dict[str, Any]) -> bool:
         """Check if generation phase is complete."""
@@ -685,7 +736,7 @@ class CustomSupervisorAgent(BaseAgent):
                 supervisor_state.workflow_state.set_phase_complete("planning")
                 supervisor_state.workflow_state.set_agent_handoff(
                     from_agent="planner_sub_supervisor",
-                    to_agent="generation_agent",
+                    to_agent="generator_swarm",
                     reason="Planning complete, proceeding to generation"
                 )
                 
@@ -718,7 +769,19 @@ class CustomSupervisorAgent(BaseAgent):
             else:
                 # Use StateTransformer for other agents
                 if agent_type == AgentType.GENERATION:
-                    supervisor_updates = StateTransformer.generation_to_supervisor(GenerationState(**agent_state))
+                    # Handle generator swarm specially (it has its own output_transform method)
+                    if agent_name == "generator_swarm":
+                        # The generator swarm has its own output_transform method
+                        # We need to call it to get the proper state transformation
+                        generator_agent = self.agents.get("generator_swarm")
+                        if generator_agent and hasattr(generator_agent, 'output_transform'):
+                            supervisor_updates = generator_agent.output_transform(agent_state)
+                        else:
+                            # Fallback to StateTransformer
+                            supervisor_updates = StateTransformer.generator_swarm_to_supervisor(GeneratorStageState(**agent_state))
+                    else:
+                        # Regular generation agent
+                        supervisor_updates = StateTransformer.generation_to_supervisor(GenerationState(**agent_state))
                 elif agent_type == AgentType.VALIDATION:
                     supervisor_updates = StateTransformer.validation_to_supervisor(ValidationState(**agent_state))
                 elif agent_type == AgentType.EDITOR:
@@ -1184,7 +1247,7 @@ class CustomSupervisorAgent(BaseAgent):
         # Check for agent-specific data fields
         agent_data_map = {
             "planner_data": "planner_sub_supervisor",
-            "generation_data": "generation_agent", 
+            "generation_data": "generator_swarm",  # Generator swarm is the primary generation agent
             "validation_data": "validation_agent",
             "editor_data": "editor_agent",
             "security_data": "security_agent",

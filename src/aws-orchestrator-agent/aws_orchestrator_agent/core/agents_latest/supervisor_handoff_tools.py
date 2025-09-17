@@ -13,7 +13,7 @@ from langchain_core.messages import ToolMessage, HumanMessage
 from langgraph.types import Command
 from langgraph.prebuilt import InjectedState
 from langgraph_supervisor.handoff import METADATA_KEY_HANDOFF_DESTINATION
-
+from aws_orchestrator_agent.core.agents_latest.types import StateTransformer
 from aws_orchestrator_agent.utils.logger import AgentLogger
 
 # Create logger
@@ -205,20 +205,18 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
         # Extract planner data from supervisor state
         planner_data = state_dict.get("planner_data")
         # Extract execution plan from the nested structure
-        execution_plan = {}
-        if planner_data and "execution_data" in planner_data:
-            execution_data = planner_data["execution_data"]
-            if execution_data and "execution_plan_data" in execution_data:
-                execution_plan_data = execution_data["execution_plan_data"]
-                if execution_plan_data and "execution_plans" in execution_plan_data:
-                    execution_plans = execution_plan_data["execution_plans"]
-                    if execution_plans and len(execution_plans) > 0:
-                        execution_plan = execution_plans[0]  # Use the first execution plan
+        # execution_plan = {}
+        # if planner_data and "execution_data" in planner_data:
+        #     execution_data = planner_data["execution_data"]
+        #     if execution_data and "execution_plan_data" in execution_data:
+        #         execution_plan_data = execution_data["execution_plan_data"]
+        #         if execution_plan_data and "execution_plans" in execution_plan_data:
+        #             execution_plans = execution_plan_data["execution_plans"]
+        #             if execution_plans and len(execution_plans) > 0:
+        #                 execution_plan = execution_plans[0]  # Use the first execution plan
         
         # Use proper state transformation for planner handoff
         if agent_name == "planner_sub_supervisor":
-            from aws_orchestrator_agent.core.agents_latest.types import StateTransformer
-            
             # Create a proper SupervisorState object for transformation
             # Don't include the tool_message in the transformation to avoid tool_call_id issues
             supervisor_state = type('SupervisorState', (), {
@@ -263,6 +261,43 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
                     "messages_count": len(state_update.get("messages", [])),
                 }
             )
+        elif agent_name == "generator_swarm":            
+            # Create a proper SupervisorState object for transformation
+            # Don't include the tool_message in the transformation to avoid tool_call_id issues
+            supervisor_state = type('SupervisorState', (), {
+                'user_request': user_request if user_request else task_description,
+                'session_id': session_id,
+                'task_id': task_id,
+                'messages': messages,  # Don't include tool_message here
+                'workspace_ref': state_dict.get("workspace_ref"),
+                'terraform_context': state_dict.get("terraform_context", {}),
+                'planner_data': state_dict.get("planner_data", {}),  # Include planner_data for generator_swarm
+            })()
+            
+            # Transform to proper GeneratorStageState
+            generator_state = StateTransformer.supervisor_to_generator_swarm(supervisor_state)
+            
+            # Convert to dict for Command update
+            state_update = generator_state.model_dump()
+            
+            # Add the tool message separately to avoid tool_call_id issues
+            state_update["messages"] = messages + [tool_message]
+            
+            # Log the transformation details
+            handoff_logger.log_structured(
+                level="DEBUG",
+                message=f"Using state transformation for {agent_name}",
+                extra={
+                    "agent_name": agent_name,
+                    "transformation_method": "StateTransformer.supervisor_to_generator_swarm",
+                    "state_update_keys": list(state_update.keys()),
+                    "messages_count": len(state_update.get("messages", [])),
+                    "has_planner_data": "planner_data" in state_dict,
+                    "has_execution_plan_data": "execution_plan_data" in state_update,
+                    "has_state_management_plan_data": "state_management_plan_data" in state_update,
+                    "has_configuration_optimizer_plan_data": "configuration_optimizer_plan_data" in state_update,
+                }
+            )
         else:
             # For other agents, use the existing approach
             # First, create a clean state dict without workflow_state
@@ -283,8 +318,8 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
                 # Each agent should manage its own workflow state independently
             }
         
-        # Log what we're excluding (only for non-planner agents)
-        if agent_name != "planner_sub_supervisor" and "workflow_state" in state_dict:
+        # Log what we're excluding (only for non-transformed agents)
+        if agent_name not in ["planner_sub_supervisor", "generator_swarm"] and "workflow_state" in state_dict:
             handoff_logger.log_structured(
                 level="DEBUG",
                 message=f"Excluding workflow_state from handoff to {agent_name}",
@@ -293,38 +328,6 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
                     "workflow_state_type": type(state_dict["workflow_state"]).__name__,
                     "excluded_keys": ["workflow_state"],
                     "included_keys": list(state_update.keys())
-                }
-            )
-        
-        # For generation_agent specifically, pass planner data and execution plan
-        if agent_name == "generation_agent" and planner_data:
-            state_update.update({
-                "planner_data": planner_data,
-                "execution_plan": execution_plan,
-                "resource_configurations": execution_plan.get("resource_configurations", []),
-                "variable_definitions": execution_plan.get("variable_definitions", []),
-                "data_sources": execution_plan.get("data_sources", []),
-                "local_values": execution_plan.get("local_values", []),
-                "dependencies": execution_plan.get("dependencies", []),
-                "security_considerations": execution_plan.get("security_considerations", []),
-                "cost_estimates": execution_plan.get("cost_estimates", []),
-                "module_name": execution_plan.get("module_name", "terraform-module"),
-                "service_name": execution_plan.get("service_name", "Unknown Service"),
-                "target_environment": execution_plan.get("target_environment", "prod")
-            })
-            
-            handoff_logger.log_structured(
-                level="INFO",
-                message="Passing planner data to generation_agent",
-                extra={
-                    "agent_name": agent_name,
-                    "has_planner_data": bool(planner_data),
-                    "has_execution_plan": bool(execution_plan),
-                    "execution_plan_keys": list(execution_plan.keys()) if execution_plan else [],
-                    "resource_configs_count": len(execution_plan.get("resource_configurations", [])),
-                    "variable_defs_count": len(execution_plan.get("variable_definitions", [])),
-                    "data_sources_count": len(execution_plan.get("data_sources", [])),
-                    "local_values_count": len(execution_plan.get("local_values", []))
                 }
             )
         

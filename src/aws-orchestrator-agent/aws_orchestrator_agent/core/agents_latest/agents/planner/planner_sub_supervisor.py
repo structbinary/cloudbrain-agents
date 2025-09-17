@@ -303,13 +303,14 @@ Available agents:
 Available handoff tools:
 - handoff_to_requirements_analyzer: Transfer to requirements analysis
 - handoff_to_execution_planner: Transfer to execution planning
-- handoff_to_planner_complete: Mark planning complete and return to main supervisor
+- mark_planning_complete: Mark planning as complete and set completion flags (call this first when all phases are done)
+- handoff_to_planner_complete: Return to main supervisor (call this after mark_planning_complete)
 
 Planning workflow:
 1. Start with requirements analysis (ALWAYS start here)
 2. Move to execution planning (may require user input)
 3. Complete with execution planning
-4. Mark planning complete when all phases are done
+4. When all phases are done: FIRST call mark_planning_complete, THEN call handoff_to_planner_complete
 
 IMPORTANT INSTRUCTIONS:
 - ALWAYS start the planning workflow by handing off to requirements_analyzer
@@ -333,22 +334,22 @@ ROUTING DECISIONS:
 1. Check planning_workflow_state.loop_counter - if > 10, terminate with error
 2. Check if planning is complete:
    - If planning_workflow_state.planning_complete == True:
-     → handoff_to_planner_complete
+     → mark_planning_complete (FIRST) → handoff_to_planner_complete (SECOND)
 3. Check planning_workflow_state.next_phase to determine routing:
    - If next_phase == "requirements_analysis" and not requirements_complete:
      → handoff_to_requirements_analyzer
    - If next_phase == "execution_planning" and requirements_complete:
      → handoff_to_execution_planner
    - If next_phase == None (all phases complete):
-     → handoff_to_planner_complete
+     → mark_planning_complete (FIRST) → handoff_to_planner_complete (SECOND)
 
 COMPLETION VALIDATION:
 - After each agent handoff, validate that the expected completion flag is set
 - Check if planning_workflow_state.planning_complete == True to determine if all phases are done
 - If completion flag not set after reasonable time, log error and retry once
 - If retry fails, terminate workflow and escalate to human
-- **CRITICAL: When planning_complete == True, you MUST immediately call handoff_to_planner_complete**
-- **DO NOT continue processing after planning is complete - ALWAYS call the handoff tool**
+- **CRITICAL: When planning_complete == True, you MUST call mark_planning_complete FIRST, then handoff_to_planner_complete**
+- **DO NOT continue processing after planning is complete - ALWAYS call both tools in sequence**
 
 ERROR HANDLING:
 - Loop counter exceeded: Terminate with "Maximum iterations reached"
@@ -361,13 +362,14 @@ When you receive a request:
 3. Only hand off to requirements_analyzer if requirements_complete = False
 4. Let the specialized agent determine if more information is needed
 5. Continue the workflow based on completion status
-6. **MANDATORY: When all phases are complete (planning_complete == True), you MUST call handoff_to_planner_complete**
+6. **MANDATORY: When all phases are complete (planning_complete == True), you MUST call mark_planning_complete FIRST, then handoff_to_planner_complete**
 
 **TOOL CALL REQUIREMENTS:**
 - You MUST use the handoff tools to transfer control - do not just return text
-- When planning_workflow_state.planning_complete == True, immediately call handoff_to_planner_complete
+- When planning_workflow_state.planning_complete == True, call mark_planning_complete FIRST, then handoff_to_planner_complete
 - Do not provide text responses when you should be calling tools
-- The handoff tools are the ONLY way to properly complete the planning workflow"""),
+- The handoff tools are the ONLY way to properly complete the planning workflow
+- **CRITICAL: Always call mark_planning_complete before handoff_to_planner_complete to prevent infinite loops**"""),
             ("human", "{user_request}")
         ])
     
@@ -459,10 +461,10 @@ When you receive a request:
             if getattr(state.planning_workflow_state, 'planning_complete', False):
                 planner_supervisor_logger.log_structured(
                     level="WARNING",
-                    message="PLANNING COMPLETE - LLM MUST CALL handoff_to_planner_complete",
+                    message="PLANNING COMPLETE - LLM MUST CALL mark_planning_complete THEN handoff_to_planner_complete",
                     extra={
                         "planning_complete": True,
-                        "instruction": "LLM should call handoff_to_planner_complete tool immediately",
+                        "instruction": "LLM should call mark_planning_complete FIRST, then handoff_to_planner_complete",
                         "current_phase": getattr(state.planning_workflow_state, 'current_phase', ''),
                         "next_phase": getattr(state.planning_workflow_state, 'next_phase', None)
                     }
@@ -680,7 +682,7 @@ When you receive a request:
             )
             
             # Create pre-model hook to transform incoming state
-            def pre_model_hook(state: PlannerSupervisorState) -> PlannerSupervisorState:
+            def pre_model_hook(state: PlannerSupervisorState) -> Dict[str, Any]:
                 """Transform incoming state to properly extract user_request and other context."""
                 try:
                     # Enhanced logging for cancellation detection
@@ -699,6 +701,84 @@ When you receive a request:
                         }
                     )
                     
+                    # CRITICAL: Message content validation function (from research findings)
+                    def is_valid_message_content(content):
+                        """Validate message content according to strict LLM requirements."""
+                        if not content:
+                            return False
+                        if isinstance(content, str):
+                            return bool(content.strip())
+                        if isinstance(content, list):
+                            return any(
+                                (isinstance(block, dict) and block.get('type') == 'text' and block.get('text', '').strip())
+                                or (isinstance(block, str) and block.strip())
+                                for block in content
+                            )
+                        return True
+                    
+                    # Initialize state updates dict (research-backed pattern)
+                    state_updates = {}
+                    
+                    # CRITICAL: Ensure llm_input_messages is populated with VALID content
+                    # This must be done FIRST before any other logic
+                    if not state.llm_input_messages and state.messages:
+                        valid_messages = []
+                        for message in reversed(state.messages):
+                            # Check if message has valid content
+                            if is_valid_message_content(getattr(message, 'content', None)):
+                                valid_messages.append(message)
+                                planner_supervisor_logger.log_structured(
+                                    level="DEBUG",
+                                    message="Found valid message for llm_input_messages",
+                                    extra={
+                                        "message_type": type(message).__name__,
+                                        "content_length": len(str(getattr(message, 'content', ''))),
+                                        "content_preview": str(getattr(message, 'content', ''))[:100]
+                                    }
+                                )
+                                break
+                            # Patch tool call-only messages (from research findings)
+                            elif hasattr(message, 'tool_calls') and message.tool_calls:
+                                # Create a patched message with placeholder content
+                                if isinstance(message, AIMessage):
+                                    patched_message = AIMessage(
+                                        content="[Tool execution completed]",
+                                        tool_calls=message.tool_calls,
+                                        additional_kwargs=getattr(message, 'additional_kwargs', {}),
+                                        response_metadata=getattr(message, 'response_metadata', {}),
+                                        id=getattr(message, 'id', None)
+                                    )
+                                    valid_messages.append(patched_message)
+                                    planner_supervisor_logger.log_structured(
+                                        level="DEBUG",
+                                        message="Patched tool call-only message with placeholder content",
+                                        extra={
+                                            "original_message_type": type(message).__name__,
+                                            "tool_calls_count": len(message.tool_calls)
+                                        }
+                                    )
+                                    break
+                        
+                        if valid_messages:
+                            state_updates["llm_input_messages"] = valid_messages
+                            planner_supervisor_logger.log_structured(
+                                level="INFO",
+                                message="Successfully populated llm_input_messages with valid content",
+                                extra={
+                                    "valid_messages_count": len(valid_messages),
+                                    "message_types": [type(msg).__name__ for msg in valid_messages]
+                                }
+                            )
+                        else:
+                            planner_supervisor_logger.log_structured(
+                                level="WARNING",
+                                message="No valid messages found for llm_input_messages",
+                                extra={
+                                    "total_messages": len(state.messages),
+                                    "message_types": [type(msg).__name__ for msg in state.messages]
+                                }
+                            )
+                    
                     # Check if this is a subsequent request (not first time)
                     is_subsequent_request = all([
                         hasattr(state, 'user_request') and state.user_request,
@@ -711,9 +791,9 @@ When you receive a request:
                         # Process subsequent request - check for agent completions
                         self._process_subsequent_request(state)
                         
-                        # Create llm_input_messages for subsequent requests
-                        llm_input_messages = [HumanMessage(content=state.user_request)]
-                        state.llm_input_messages = llm_input_messages
+                        # CRITICAL: Don't overwrite llm_input_messages - only set if not already populated with valid content
+                        if not state_updates.get("llm_input_messages"):
+                            state_updates["llm_input_messages"] = [HumanMessage(content=state.user_request)]
                         
                     else:
                         # SECOND CONDITION: This IS the first request - extract user_request, task_description, etc.
@@ -775,39 +855,64 @@ When you receive a request:
                             }
                         )
                         
-                        # Update the PlannerSupervisorState (same instance used by both supervisor and requirements analyzer)
-                        state.user_request = user_request
-                        state.task_description = task_description
-                        state.session_id = session_id
-                        state.task_id = task_id
+                        # CRITICAL: Update state via state_updates dict (research-backed pattern)
+                        # NO in-place mutations - LangGraph ignores them
+                        state_updates.update({
+                            "user_request": user_request,
+                            "task_description": task_description,
+                            "session_id": session_id,
+                            "task_id": task_id
+                        })
+                        
+                        # CRITICAL: Only set llm_input_messages if not already populated with valid content
+                        if not state_updates.get("llm_input_messages"):
+                            state_updates["llm_input_messages"] = [HumanMessage(content=user_request)]
                         
                         planner_supervisor_logger.log_structured(
                             level="INFO",
-                            message="Pre-model hook: Updated shared state instance",
+                            message="Pre-model hook: Updated state via state_updates dict",
                             extra={
                                 "user_request": user_request,
                                 "task_description": task_description,
                                 "session_id": session_id,
-                                "task_id": task_id
+                                "task_id": task_id,
+                                "state_updates_keys": list(state_updates.keys())
                             }
                         )
                         
                         # Create llm_input_messages with the extracted user request
-                        llm_input_messages = [HumanMessage(content=user_request)]
-                        
-                        # Add system message to emphasize tool usage when planning is complete
-                        if getattr(state.planning_workflow_state, 'planning_complete', False):
-                            system_message = SystemMessage(content="CRITICAL: Planning is complete. You MUST call handoff_to_planner_complete tool immediately. Do not provide text responses.")
-                            llm_input_messages.insert(0, system_message)
-                        
-                        state.llm_input_messages = llm_input_messages
+                        # state_updates["llm_input_messages"] = [HumanMessage(content=user_request)]
                         self._planner_supervisor_state.session_id = state.session_id
                         self._planner_supervisor_state.task_id = state.task_id
                         self._planner_supervisor_state.user_request = state.user_request
                         self._planner_supervisor_state.task_description = state.task_description
                         self._planner_supervisor_state.planning_workflow_state.current_phase = state.planning_workflow_state.current_phase
                     
-                    return state
+                    
+                    # CRITICAL: Return state updates dict (research-backed pattern)
+                    # For message updates, we need to use the RemoveMessage pattern
+                    if "llm_input_messages" in state_updates:
+                        from langchain_core.messages import RemoveMessage
+                        from langgraph.graph.message import REMOVE_ALL_MESSAGES
+                        
+                        # Use the correct pattern for message overwrites
+                        new_llm_messages = state_updates["llm_input_messages"]
+                        state_updates["llm_input_messages"] = [
+                            RemoveMessage(id=REMOVE_ALL_MESSAGES), 
+                            *new_llm_messages
+                        ]
+                    
+                    planner_supervisor_logger.log_structured(
+                        level="DEBUG",
+                        message="Pre-model hook: Returning state updates with RemoveMessage pattern",
+                        extra={
+                            "state_updates_keys": list(state_updates.keys()),
+                            "llm_input_messages_count": len(state_updates.get("llm_input_messages", [])),
+                            "messages_count": len(state_updates.get("messages", [])),
+                            "is_subsequent_request": is_subsequent_request
+                        }
+                    )
+                    return state_updates
                     
                 except Exception as e:
                     planner_supervisor_logger.log_structured(
@@ -819,7 +924,8 @@ When you receive a request:
                             "traceback": traceback.format_exc()
                         }
                     )
-                    return state
+                    # Return empty dict on error (research-backed pattern)
+                    return {}
             
             # Create supervisor with the SAME state instance that requirements analyzer uses
             # Add proper configuration to prevent CancelledError issues

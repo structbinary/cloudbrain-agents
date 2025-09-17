@@ -130,7 +130,7 @@ class PlannerSupervisorState(BaseModel):
     )
     
     # LLM input messages for langgraph-supervisor
-    llm_input_messages: Annotated[List[BaseMessage], add_messages] = Field(
+    llm_input_messages: Annotated[List[AnyMessage], add_messages] = Field(
         default_factory=list,
         description="Message history for langgraph-supervisor LLM input"
     )
@@ -199,6 +199,16 @@ class PlannerSupervisorState(BaseModel):
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
         description="Additional metadata for the planning workflow"
+    )
+    
+    # NEW: Completion signaling flags for preventing infinite loops
+    completion_emitted: bool = Field(
+        default=False,
+        description="Prevents re-entry into completion logic in pre_model_hook"
+    )
+    completion_lock: bool = Field(
+        default=False,
+        description="Atomic lock for completion operations to prevent race conditions"
     )
     
     @model_validator(mode='after')

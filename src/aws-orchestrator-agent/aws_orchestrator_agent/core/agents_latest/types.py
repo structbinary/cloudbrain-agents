@@ -14,8 +14,11 @@ from datetime import datetime, timezone
 import uuid
 
 # LangGraph imports for proper message handling
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AnyMessage, HumanMessage
 from langgraph.graph.message import add_messages
+
+# Import generator types for StateTransformer
+from .agents.generator.generator_state import GeneratorStageState, GeneratorAgentStatus
 
 
 
@@ -614,6 +617,81 @@ class StateTransformer:
         )
     
     @staticmethod
+    def supervisor_to_generator_swarm(supervisor_state: SupervisorState) -> GeneratorStageState:
+        """Transform supervisor state to generator swarm state."""
+        # Extract planner data and execution plan
+        planner_data = supervisor_state.planner_data or {}
+        execution_data = planner_data.get("execution_data", {})
+        
+        return GeneratorStageState(
+            messages=[HumanMessage(content="Generate Terraform module from execution plan")],
+            active_agent="resource_configuration_agent",
+            stage_status="planning_active",
+            planning_progress={
+                "resource_configuration_agent": 0.0,
+                "variable_definition_agent": 0.0,
+                "data_source_agent": 0.0,
+                "local_values_agent": 0.0,
+                "output_definition_agent": 0.0
+            },
+            agent_status_matrix={
+                "resource_configuration_agent": GeneratorAgentStatus.INACTIVE,
+                "variable_definition_agent": GeneratorAgentStatus.INACTIVE,
+                "data_source_agent": GeneratorAgentStatus.INACTIVE,
+                "local_values_agent": GeneratorAgentStatus.INACTIVE,
+                "output_definition_agent": GeneratorAgentStatus.INACTIVE
+            },
+            # Required fields with defaults
+            pending_dependencies={},
+            resolved_dependencies={},
+            dependency_graph={},
+            agent_workspaces={
+                "resource_configuration_agent": {
+                    "generated_resources": [],
+                    "pending_variable_requests": [],
+                    "pending_data_source_requests": [],
+                    "completion_checklist": []
+                },
+                "variable_definition_agent": {
+                    "generated_variables": [],
+                    "variable_validation_rules": [],
+                    "source_requests": [],
+                    "completion_checklist": []
+                },
+                "data_source_agent": {
+                    "generated_data_sources": [],
+                    "external_dependencies": [],
+                    "completion_checklist": []
+                },
+                "local_values_agent": {
+                    "generated_locals": [],
+                    "computed_expressions": [],
+                    "completion_checklist": []
+                },
+                "output_definition_agent": {
+                    "generated_outputs": [],
+                    "output_validation_rules": [],
+                    "source_requests": [],
+                    "completion_checklist": []
+                }
+            },
+            session_id=supervisor_state.session_id,
+            task_id=supervisor_state.task_id,
+            handoff_queue=[],
+            communication_log=[],
+            checkpoint_metadata={},
+            recovery_context=None,
+            approval_required=False,
+            approval_context={},
+            pending_human_decisions=[],
+            
+            # Planner data fields - extracted from nested structure
+            execution_plan_data=execution_data.get("execution_plan_data"),
+            state_management_plan_data=execution_data.get("state_management_data"),
+            configuration_optimizer_plan_data=execution_data.get("configuration_optimizer_data")
+        )
+    
+    @staticmethod
     def supervisor_to_validation(supervisor_state: SupervisorState) -> ValidationState:
         """Transform supervisor state to validation state."""
         return ValidationState(
@@ -682,6 +760,44 @@ class StateTransformer:
             "generated_module_ref": generation_state.generated_files_ref,
             "question": generation_state.question,
             "current_agent": AgentType.VALIDATION,
+        }
+    
+    @staticmethod
+    def generator_swarm_to_supervisor(generator_swarm_state) -> Dict[str, Any]:
+        """Transform generator swarm state back to supervisor updates."""
+        # Extract generated artifacts from the swarm state
+        agent_workspaces = generator_swarm_state.get("agent_workspaces", {})
+        
+        # Collect all generated artifacts
+        generated_resources = agent_workspaces.get("resource_configuration_agent", {}).get("generated_resources", [])
+        generated_variables = agent_workspaces.get("variable_definition_agent", {}).get("generated_variables", [])
+        generated_data_sources = agent_workspaces.get("data_source_agent", {}).get("generated_data_sources", [])
+        generated_locals = agent_workspaces.get("local_values_agent", {}).get("generated_locals", [])
+        generated_outputs = agent_workspaces.get("output_definition_agent", {}).get("generated_outputs", [])
+        
+        # Extract planning context for metadata
+        planning_context = generator_swarm_state.get("planning_context", {})
+        
+        return {
+            "generation_data": {
+                "generated_resources": generated_resources,
+                "generated_variables": generated_variables,
+                "generated_data_sources": generated_data_sources,
+                "generated_locals": generated_locals,
+                "generated_outputs": generated_outputs,
+                "module_name": planning_context.get("module_name", "terraform-module"),
+                "service_name": planning_context.get("service_name", "Unknown Service"),
+                "target_environment": planning_context.get("target_environment", "prod"),
+                "stage_progress": generator_swarm_state.get("stage_progress", {}),
+                "agent_status_matrix": generator_swarm_state.get("agent_status_matrix", {}),
+            },
+            "generated_module_ref": f"terraform-module-{planning_context.get('module_name', 'unknown')}",
+            "question": None,  # Generator swarm doesn't typically ask questions
+            "current_agent": AgentType.VALIDATION,  # Next step after generation
+            "workflow_state": {
+                "generation_complete": True,
+                "next_agent": "validation_agent",
+            }
         }
     
     @staticmethod

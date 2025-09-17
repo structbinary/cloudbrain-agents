@@ -11,11 +11,15 @@ This module implements custom handoff tools for the planner sub-supervisor that:
 from typing import Annotated, Dict, Any, Optional
 from datetime import datetime
 from langchain_core.tools import tool, BaseTool, InjectedToolCallId
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolMessage, HumanMessage
 from langgraph.types import Command
+from langgraph.graph import END
 from langgraph.prebuilt import InjectedState
 from langgraph_supervisor.handoff import METADATA_KEY_HANDOFF_DESTINATION
 from aws_orchestrator_agent.utils.logger import AgentLogger
+
+# Create agent logger for planner handoff tools
+planner_supervisor_logger = AgentLogger("PLANNER_HANDOFF_TOOLS")
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -59,7 +63,7 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
         messages = getattr(state, "messages", [])
         return Command(
             goto=agent_name,
-            graph=Command.PARENT,
+            # graph=Command.PARENT,
             # NOTE: this is a state update that will be applied to the swarm multi-agent graph (i.e., the PARENT graph)
             update={
                 "messages": messages + [tool_message],
@@ -106,6 +110,96 @@ def create_handoff_to_execution_planner() -> BaseTool:
         description="Transfer control to the Execution Planner agent to create execution plans and assess risks."
     )
 
+def create_mark_planning_complete() -> BaseTool:
+    """Create tool for marking planning as complete and setting completion flags."""
+    
+    @tool
+    def mark_planning_complete(
+        task_description: Annotated[str, "Description of the completed planning task"],
+        state: Annotated[Any, InjectedState],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ) -> Command:
+        """
+        Mark planning as complete and set completion flags to prevent infinite loops.
+        
+        Call this tool when all planning phases are done, before calling handoff_to_planner_complete.
+        This tool sets the completion flags and llm_input_messages to prevent the infinite loop.
+        """
+        try:
+            planner_supervisor_logger.log_structured(
+                level="INFO",
+                message="Marking planning as complete - setting completion flags and llm_input_messages",
+                extra={
+                    "task_description": task_description,
+                    "action": "Setting completion_emitted=True, completion_lock=False, and llm_input_messages"
+                }
+            )
+            
+            # Create completion message for llm_input_messages
+            completion_message = HumanMessage(content=f"Planning marked as complete: {task_description}. Now calling handoff_to_planner_complete to return to main supervisor.")
+            
+            # Create tool message
+            tool_message = ToolMessage(
+                content=f"Planning marked as complete: {task_description}",
+                name="mark_planning_complete",
+                tool_call_id=tool_call_id,
+            )
+            
+            # Access messages directly from state
+            messages = getattr(state, "messages", [])
+            
+            # Create the command with state updates
+            command = Command(
+                goto="planner_sub_supervisor",  # Stay in current graph
+                graph=Command.PARENT,
+                update={
+                    "messages": messages + [tool_message],
+                    "llm_input_messages": [completion_message],
+                    "completion_emitted": True,   # Mark completion as emitted
+                    "completion_lock": False,     # Release any locks
+                },
+            )
+            
+            planner_supervisor_logger.log_structured(
+                level="INFO",
+                message="Completion state management command created successfully",
+                extra={
+                    "task_description": task_description,
+                    "completion_emitted": True,
+                    "completion_lock": False,
+                    "llm_input_messages_set": True,
+                    "messages_count": len(messages) + 1
+                }
+            )
+            
+            return command
+            
+        except Exception as e:
+            planner_supervisor_logger.log_structured(
+                level="ERROR",
+                message="Error marking planning as complete",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "task_description": task_description
+                }
+            )
+            # Return error command
+            return Command(
+                goto="planner_sub_supervisor",
+                # graph=Command.PARENT,
+                update={
+                    "messages": getattr(state, "messages", []) + [ToolMessage(
+                        content=f"Error marking planning as complete: {str(e)}",
+                        name="mark_planning_complete",
+                        tool_call_id=tool_call_id,
+                    )],
+                    "error": str(e)
+                },
+            )
+    
+    return mark_planning_complete
+
 def create_handoff_to_planner_complete() -> BaseTool:
     """Create handoff tool to mark planning complete and return to main supervisor."""
     
@@ -126,6 +220,10 @@ def create_handoff_to_planner_complete() -> BaseTool:
         Returns:
             Command to end the planning workflow
         """
+        # Check completion flags and set them if needed
+        completion_emitted = getattr(state, 'completion_emitted', False)
+        completion_lock = getattr(state, 'completion_lock', False)
+        
         # Log handoff tool execution
         logger.log_structured(
             level="INFO",
@@ -144,6 +242,8 @@ def create_handoff_to_planner_complete() -> BaseTool:
                 "has_requirements_data": bool(getattr(state, "requirements_data", None)),
                 "has_execution_data": bool(getattr(state, "execution_data", None)),
                 "has_planning_results": bool(getattr(state, "planning_results", None)),
+                "completion_emitted": completion_emitted,
+                "completion_lock": completion_lock,
                 "timestamp": datetime.now().isoformat()
             }
         )
@@ -189,16 +289,15 @@ def create_handoff_to_planner_complete() -> BaseTool:
         
         # Create the command
         command = Command(
-            goto="supervisor",  # Return to parent graph (supervisor) - this is the correct way
-            graph=Command.PARENT,
+            goto="supervisor",
+            graph=Command.PARENT,  # Use END to terminate the subgraph and return to parent
             update={
                 "messages": messages + [tool_message],
-                "active_agent": None,
-                "task_description": task_description,
-                "status": "completed",
-                "planning_complete": True,
                 "planner_data": planner_data,  # Pass planning data to Supervisor
-            },
+                "workflow_state": {
+                    "planning_complete": True  # CRITICAL: Set completion flag in workflow_state
+                }
+            }
         )
         
         # Log successful completion before returning
@@ -239,5 +338,6 @@ def create_planner_handoff_tools() -> Dict[str, BaseTool]:
         # "handoff_to_tf_security_n_best_practices_evaluator": create_handoff_to_tf_security_n_best_practices_evaluator(),
         # "handoff_to_security_n_best_practices_evaluator": create_handoff_to_security_n_best_practices_evaluator(),
         "handoff_to_execution_planner": create_handoff_to_execution_planner(),
+        "mark_planning_complete": create_mark_planning_complete(),
         "handoff_to_planner_complete": create_handoff_to_planner_complete(),
     }
