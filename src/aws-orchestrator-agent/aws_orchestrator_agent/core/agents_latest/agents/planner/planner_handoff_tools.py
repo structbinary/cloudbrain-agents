@@ -7,7 +7,7 @@ This module implements custom handoff tools for the planner sub-supervisor that:
 - Handle planning phase transitions
 - Maintain planning data across handoffs
 """
-
+import json
 from typing import Annotated, Dict, Any, Optional
 from datetime import datetime
 from langchain_core.tools import tool, BaseTool, InjectedToolCallId
@@ -146,13 +146,12 @@ def create_mark_planning_complete() -> BaseTool:
             planning_results = getattr(state, "planning_results", None)
         
             # Create planner_data structure that Supervisor expects
-            # Ensure all data is properly serialized to plain dicts
+            # Ensure all data is properly serialized to plain dicts with datetime objects as ISO strings
             planner_data = {
-                "requirements_data": requirements_data.model_dump() if hasattr(requirements_data, 'model_dump') else (requirements_data if requirements_data else {}),
-                "execution_data": execution_data.model_dump() if hasattr(execution_data, 'model_dump') else (execution_data if execution_data else {}),
-                "planning_results": planning_results.model_dump() if hasattr(planning_results, 'model_dump') else (planning_results if planning_results else {}),
-                "planning_complete": True,
-                "completion_timestamp": getattr(state, "completion_timestamp", None)
+                "requirements_data": requirements_data.model_dump(mode='json') if hasattr(requirements_data, 'model_dump') else (requirements_data if requirements_data else {}),
+                "execution_data": execution_data.model_dump(mode='json') if hasattr(execution_data, 'model_dump') else (execution_data if execution_data else {}),
+                "planning_results": planning_results.model_dump(mode='json') if hasattr(planning_results, 'model_dump') else (planning_results if planning_results else {}),
+                "planning_complete": True
             }
 
             # tool_message = ToolMessage(
@@ -163,8 +162,11 @@ def create_mark_planning_complete() -> BaseTool:
 
             ## Facing handoff issue so using the message history itself to pass the planner data back to supervisor.
 
+            # Serialize planner_data as JSON string for proper parsing
+            # planner_data_json = json.dumps(planner_data)
+            
             planner_result = ToolMessage(
-                content=f"{planner_data}",
+                content=planner_data,
                 name="mark_planning_complete",
                 tool_call_id=tool_call_id,
             )
@@ -288,13 +290,12 @@ def create_handoff_to_planner_complete() -> BaseTool:
         planning_results = getattr(state, "planning_results", None)
         
         # Create planner_data structure that Supervisor expects
-        # Ensure all data is properly serialized to plain dicts
+        # Ensure all data is properly serialized to plain dicts with datetime objects as ISO strings
         planner_data = {
-            "requirements_data": requirements_data.model_dump() if hasattr(requirements_data, 'model_dump') else (requirements_data if requirements_data else {}),
-            "execution_data": execution_data.model_dump() if hasattr(execution_data, 'model_dump') else (execution_data if execution_data else {}),
-            "planning_results": planning_results.model_dump() if hasattr(planning_results, 'model_dump') else (planning_results if planning_results else {}),
-            "planning_complete": True,
-            "completion_timestamp": getattr(state, "completion_timestamp", None)
+            "requirements_data": requirements_data.model_dump(mode='json') if hasattr(requirements_data, 'model_dump') else (requirements_data if requirements_data else {}),
+            "execution_data": execution_data.model_dump(mode='json') if hasattr(execution_data, 'model_dump') else (execution_data if execution_data else {}),
+            "planning_results": planning_results.model_dump(mode='json') if hasattr(planning_results, 'model_dump') else (planning_results if planning_results else {}),
+            "planning_complete": True
         }
         
         # Log the handoff data being passed

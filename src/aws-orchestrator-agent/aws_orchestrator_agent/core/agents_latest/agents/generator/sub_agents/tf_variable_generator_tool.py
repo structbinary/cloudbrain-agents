@@ -15,6 +15,7 @@ from langgraph.types import Command
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
+from ..generator_state import GeneratorStageState
 from .variable_generator_prompts import VARIABLE_DEFINITION_AGENT_SYSTEM_PROMPT, VARIABLE_DEFINITION_AGENT_USER_PROMPT_TEMPLATE
 
 # Create agent logger for variable generator
@@ -246,10 +247,8 @@ class TerraformVariableGenerationResponse(BaseModel):
         return v
 
 @tool("generate_terraform_variables")
-def generate_terraform_variables(
-    variable_requirements: Annotated[List[Dict[str, Any]], "Variable requirements from execution plan or agent requests"],
-    generation_context: Annotated[Dict[str, Any], "Context from execution plan and previous agents"], 
-    state: Annotated[Dict[str, Any], InjectedState]
+async def generate_terraform_variables(
+    state: Annotated[Any, InjectedState]
 ) -> TerraformVariableGenerationResponse:
     """
     Generate Terraform input variables from execution plan specifications and agent requests.
@@ -262,20 +261,24 @@ def generate_terraform_variables(
     try:
         start_time = datetime.now()
         
+        # Extract data from state
+        variable_requirements = state.get('variable_definitions', []) or []
+        generation_context = state.get('planning_context', {}) or {}
+        
         variable_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform variable generation",
             extra={
                 "variable_requirements_count": len(variable_requirements),
-                "generation_id": state.get('generation_id', 'unknown'),
-                "current_stage": state.get('current_stage', 'unknown'),
-                "active_agent": state.get('active_agent', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown'),
+                "current_stage": generator_state.get('current_stage', 'unknown'),
+                "active_agent": generator_state.get('active_agent', 'unknown')
             }
         )
         
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
-        workspace = state.get('agent_workspaces', {}).get('variable_definition_agent', {})
+        workspace = generator_state.get('agent_workspaces', {}).get('variable_definition_agent', {})
         
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
@@ -286,14 +289,14 @@ def generate_terraform_variables(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
-            generation_id=state.get('generation_id', str(uuid.uuid4())),
+            generation_id=generator_state.get('generation_id', str(uuid.uuid4())),
             variable_requirements=escape_json_for_template(json.dumps(variable_requirements, indent=2)),
-            current_stage=state.get('current_stage', 'planning'),
-            active_agent=state.get('active_agent', 'variable_definition_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(state.get('resolved_dependencies', {}), indent=2)),
+            current_stage=generator_state.get('current_stage', 'planning'),
+            active_agent=generator_state.get('active_agent', 'variable_definition_agent'),
+            previous_agent_results=escape_json_for_template(json.dumps(generator_state.get('resolved_dependencies', {}), indent=2)),
             generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
             specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(state.get('handoff_context', {}), indent=2)),
+            handoff_context=escape_json_for_template(json.dumps(generator_state.get('handoff_context', {}), indent=2)),
             agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
         )
         
@@ -357,12 +360,12 @@ def generate_terraform_variables(
             message="Executing LLM chain for variable generation",
             extra={
                 "prompt_length": len(formatted_user_prompt),
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
         # Execute the chain
-        llm_response = chain.invoke({})
+        llm_response = await chain.ainvoke({})
         
         variable_generator_logger.log_structured(
             level="DEBUG",
@@ -370,7 +373,7 @@ def generate_terraform_variables(
             extra={
                 "generated_variables_count": len(llm_response.generated_variables),
                 "discovered_dependencies_count": len(llm_response.discovered_dependencies),
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
@@ -390,24 +393,25 @@ def generate_terraform_variables(
                 "final_dependencies_count": len(enhanced_response.discovered_dependencies),
                 "generation_duration_seconds": enhanced_response.generation_metadata.generation_duration_seconds,
                 "completion_status": enhanced_response.completion_status,
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
         return enhanced_response
         
     except Exception as e:
+        generator_state = state.get('generator_state', {})
         variable_generator_logger.log_structured(
             level="ERROR",
             message="Terraform variable generation failed",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
-                "generation_id": state.get('generation_id', 'unknown'),
-                "current_stage": state.get('current_stage', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown'),
+                "current_stage": generator_state.get('current_stage', 'unknown')
             }
         )
-        return create_variable_error_response(e, state, datetime.now())
+        return create_variable_error_response(e, generator_state, datetime.now())
 
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
     """Extract specific requirements from context"""

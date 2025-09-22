@@ -8,7 +8,7 @@ with minimal state overlap and external artifact references.
 
 from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Dict, List, Optional, Any, Union, Annotated, AsyncGenerator
+from typing import Dict, List, Optional, Any, Union, Annotated, AsyncGenerator, Set
 from enum import Enum
 from datetime import datetime, timezone
 import uuid
@@ -268,6 +268,10 @@ class SupervisorState(BaseModel):
     
     # Required by langgraph-supervisor
     remaining_steps: int = Field(default=50, description="Remaining steps for the agent to complete")
+
+    # ## Generator swarm need this to track active agent
+    # active_agent: Optional[str] = None
+
     llm_input_messages: Annotated[List[AnyMessage], add_messages] = Field(
         default_factory=list,
         description="LLM input messages for langgraph-supervisor"
@@ -319,6 +323,9 @@ class SupervisorState(BaseModel):
     editor_data: Optional[Dict[str, Any]] = None
     security_data: Optional[Dict[str, Any]] = None
     cost_data: Optional[Dict[str, Any]] = None
+    
+    # # Generator Swarm State (nested approach)
+    # generator_state: Optional[GeneratorStageState] = None
     
     # Generation-specific context fields (extracted from planner_data for direct access)
     execution_plan: Optional[Dict[str, Any]] = None  # Direct access to execution plan
@@ -594,37 +601,61 @@ class StateTransformer:
     
     @staticmethod
     def supervisor_to_generation(supervisor_state: SupervisorState) -> GenerationState:
-        """Transform supervisor state to generation state with full planner data."""
+        """Transform supervisor state to generation state with actual planner output structure."""
         planner_data = supervisor_state.planner_data or {}
-        execution_plan = planner_data.get("execution_plan", {})
+        execution_data = planner_data.get("execution_data", {})
+        execution_plan_data = execution_data.get("execution_plan_data", {})
+        
+        # Extract execution plans from the nested structure
+        execution_plans = execution_plan_data.get("execution_plans", [])
+        primary_execution_plan = execution_plans[0] if execution_plans else {}
         
         return GenerationState(
-            requirements=planner_data.get("requirements_analysis", {}),
-            provider_versions=planner_data.get("provider_versions", {}),
+            requirements=planner_data.get("requirements_data", {}),
+            provider_versions=primary_execution_plan.get("required_providers", {}),
             registry_schemas_ref=supervisor_state.workspace_ref,
             standards_profile=planner_data.get("standards_profile", {}),
-            module_name=execution_plan.get("module_name", f"module_{supervisor_state.workflow_id[:8]}"),
+            module_name=primary_execution_plan.get("module_name", f"module_{supervisor_state.workflow_id[:8]}"),
             
-            # Direct execution plan data
-            execution_plan=execution_plan,
-            resource_configurations=execution_plan.get("resource_configurations", []),
-            variable_definitions=execution_plan.get("variable_definitions", []),
-            data_sources=execution_plan.get("data_sources", []),
-            local_values=execution_plan.get("local_values", []),
-            dependencies=execution_plan.get("dependencies", []),
-            security_considerations=execution_plan.get("security_considerations", []),
-            cost_estimates=execution_plan.get("cost_estimates", [])
+            # Direct execution plan data from actual structure
+            execution_plan=primary_execution_plan,
+            resource_configurations=primary_execution_plan.get("resource_configurations", []),
+            variable_definitions=primary_execution_plan.get("variable_definitions", []),
+            data_sources=primary_execution_plan.get("data_sources", []),
+            local_values=primary_execution_plan.get("local_values", []),
+            dependencies=primary_execution_plan.get("resource_dependencies", []),
+            security_considerations=primary_execution_plan.get("security_considerations", []),
+            cost_estimates=primary_execution_plan.get("estimated_costs", {})
         )
     
     @staticmethod
     def supervisor_to_generator_swarm(supervisor_state: SupervisorState) -> GeneratorStageState:
-        """Transform supervisor state to generator swarm state."""
-        # Extract planner data and execution plan
+        """Transform supervisor state to generator swarm state with actual planner output structure."""
+        # Extract planner data and execution plan from the actual structure
+        # messages = supervisor_state.messages
+        # llm_input_messages = supervisor_state.llm_input_messages
         planner_data = supervisor_state.planner_data or {}
         execution_data = planner_data.get("execution_data", {})
+        execution_plan_data = execution_data.get("execution_plan_data", {})
+        
+        # Extract execution plans from the nested structure
+        execution_plans = execution_plan_data.get("execution_plans", [])
+        primary_execution_plan = execution_plans[0] if execution_plans else {}
+        
+        # Extract specific data sections for each agent
+        resource_configurations = primary_execution_plan.get("resource_configurations", [])
+        variable_definitions = primary_execution_plan.get("variable_definitions", [])
+        data_sources = primary_execution_plan.get("data_sources", [])
+        local_values = primary_execution_plan.get("local_values", [])
+        output_definitions = primary_execution_plan.get("output_definitions", [])
+        dependencies = primary_execution_plan.get("resource_dependencies", [])
+        security_considerations = primary_execution_plan.get("security_considerations", [])
+        cost_estimates = primary_execution_plan.get("estimated_costs", {})
+        
+        # Create default human message for generator swarm
+        default_message = HumanMessage(content="Generate Terraform module from execution plan")
         
         return GeneratorStageState(
-            messages=[HumanMessage(content="Generate Terraform module from execution plan")],
             active_agent="resource_configuration_agent",
             stage_status="planning_active",
             planning_progress={
@@ -634,6 +665,8 @@ class StateTransformer:
                 "local_values_agent": 0.0,
                 "output_definition_agent": 0.0
             },
+            messages=[default_message],
+            llm_input_messages=[default_message],
             agent_status_matrix={
                 "resource_configuration_agent": GeneratorAgentStatus.INACTIVE,
                 "variable_definition_agent": GeneratorAgentStatus.INACTIVE,
@@ -650,29 +683,63 @@ class StateTransformer:
                     "generated_resources": [],
                     "pending_variable_requests": [],
                     "pending_data_source_requests": [],
-                    "completion_checklist": []
+                    "completion_checklist": [],
+                    # Add planner input data from actual structure
+                    "planner_input": resource_configurations,
+                    "module_structure": execution_data.get("module_structure_plan", {}),
+                    "optimization_data": execution_data.get("configuration_optimizer_data", {}),
+                    "terraform_files": primary_execution_plan.get("terraform_files", []),
+                    # Additional detailed context from input_transform
+                    "dependencies": dependencies,  # resource_dependencies from execution plan
+                    "security_context": security_considerations,  # security_considerations from execution plan
+                    "cost_context": cost_estimates  # estimated_costs from execution plan
                 },
                 "variable_definition_agent": {
                     "generated_variables": [],
                     "variable_validation_rules": [],
                     "source_requests": [],
-                    "completion_checklist": []
+                    "completion_checklist": [],
+                    # Add planner input data from actual structure
+                    "planner_input": variable_definitions,
+                    "validation_context": {
+                        "validation_rules": [var.get("validation_rules", []) for var in variable_definitions],
+                        "default_values": {var.get("name"): var.get("default") for var in variable_definitions if var.get("default") is not None},
+                        "sensitive_variables": [var.get("name") for var in variable_definitions if var.get("sensitive", False)]
+                    },
+                    # Additional detailed context from input_transform
+                    "resource_dependencies": dependencies  # resource_dependencies from execution plan
                 },
                 "data_source_agent": {
                     "generated_data_sources": [],
-                    "external_dependencies": [],
-                    "completion_checklist": []
+                    "external_dependencies": data_sources,  # data_sources from execution plan
+                    "completion_checklist": [],
+                    # Add planner input data from actual structure
+                    "planner_input": data_sources,
+                    # Additional detailed context from input_transform
+                    "resource_dependencies": dependencies  # resource_dependencies from execution plan
                 },
                 "local_values_agent": {
                     "generated_locals": [],
-                    "computed_expressions": [],
-                    "completion_checklist": []
+                    "computed_expressions": local_values,  # local_values from execution plan
+                    "completion_checklist": [],
+                    # Add planner input data from actual structure
+                    "planner_input": local_values,
+                    # Additional detailed context from input_transform
+                    "computed_dependencies": dependencies  # resource_dependencies from execution plan
                 },
                 "output_definition_agent": {
                     "generated_outputs": [],
                     "output_validation_rules": [],
                     "source_requests": [],
-                    "completion_checklist": []
+                    "completion_checklist": [],
+                    # Add planner input data from actual structure
+                    "planner_input": output_definitions,
+                    "output_context": {
+                        "dependencies": [output.get("depends_on", []) for output in output_definitions],
+                        "preconditions": [output.get("precondition") for output in output_definitions if output.get("precondition")]
+                    },
+                    # Additional detailed context from input_transform
+                    "resource_dependencies": dependencies  # resource_dependencies from execution plan
                 }
             },
             session_id=supervisor_state.session_id,
@@ -686,9 +753,39 @@ class StateTransformer:
             pending_human_decisions=[],
             
             # Planner data fields - extracted from nested structure
-            execution_plan_data=execution_data.get("execution_plan_data"),
+            execution_plan_data=execution_plan_data,
             state_management_plan_data=execution_data.get("state_management_data"),
-            configuration_optimizer_plan_data=execution_data.get("configuration_optimizer_data")
+            configuration_optimizer_plan_data=execution_data.get("configuration_optimizer_data"),
+            
+            # Additional context fields for enhanced functionality
+            planning_context={
+                "dependencies": dependencies,
+                "security_considerations": security_considerations,
+                "cost_estimates": cost_estimates,
+                "module_name": primary_execution_plan.get("module_name", "terraform-module"),
+                "service_name": primary_execution_plan.get("service_name", "Unknown Service"),
+                "target_environment": primary_execution_plan.get("target_environment", "prod"),
+                "execution_plan": primary_execution_plan,
+                "planner_data": planner_data,
+                # Additional context from actual structure
+                "module_structure_plan": execution_data.get("module_structure_plan", {}),
+                "configuration_optimizer_data": execution_data.get("configuration_optimizer_data", {}),
+                "state_management_data": execution_data.get("state_management_data", {}),
+                "requirements_data": planner_data.get("requirements_data", {}),
+                "terraform_files": primary_execution_plan.get("terraform_files", []),
+                "required_providers": primary_execution_plan.get("required_providers", {}),
+                "terraform_version_constraint": primary_execution_plan.get("terraform_version_constraint", ">= 1.0.0")
+            },
+            
+            # Stage progress tracking
+            stage_progress={
+                "planning": 0.0,
+                "enhancement": 0.0,
+                "integration": 0.0
+            },
+            
+            # Current stage
+            current_stage="planning"
         )
     
     @staticmethod

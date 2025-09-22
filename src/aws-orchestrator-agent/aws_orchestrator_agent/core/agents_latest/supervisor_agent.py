@@ -8,6 +8,8 @@ Uses centralized Config and LLMProvider.
 
 import logging
 import uuid
+import ast
+import json
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Callable, AsyncGenerator, Annotated
 from langchain_core.messages import AnyMessage, HumanMessage, AIMessage
@@ -194,7 +196,7 @@ class CustomSupervisorAgent(BaseAgent):
         agent_descriptions = "\n".join([f"- {name}: {self._get_agent_description(name)}" for name in agent_names])
         
         return f"""
-        You are a supervisor managing specialized infrastructure agents.
+        You are a supervisor managing specialized infrastructure agents for AWS Terraform module generation.
         
         Available agents:
         {agent_descriptions}
@@ -213,6 +215,33 @@ class CustomSupervisorAgent(BaseAgent):
         - Use editor_agent to modify existing configurations if requested
         
         CRITICAL: When planning is complete, you MUST continue the workflow by delegating to the next agent. Do not stop or wait.
+        
+        ROUTING DECISIONS:
+        1. Check workflow_state.loop_counter - if > 20, terminate with error
+        2. Check current workflow phase and completion status:
+           - If workflow_state.current_phase == "planning" and not planning_complete:
+             → transfer_to_planner_sub_supervisor
+           - If workflow_state.current_phase == "planning" and planning_complete and not generation_complete:
+             → transfer_to_generator_swarm
+           - If workflow_state.current_phase == "generation" and generation_complete and not validation_complete:
+             → transfer_to_validation_agent
+           - If workflow_state.current_phase == "validation" and validation_complete:
+             → Workflow complete, return final result
+        3. Check for specific user requests:
+           - If user wants to modify existing code: → transfer_to_editor_agent
+           - If user wants to validate existing code: → transfer_to_validation_agent
+           - If user wants new infrastructure: → transfer_to_planner_sub_supervisor
+        
+        COMPLETION VALIDATION:
+        - After each agent handoff, validate that the expected completion flag is set
+        - Check workflow_state for phase completion flags:
+          * planning_complete: True when planner_data is available and planning_complete=True
+          * generation_complete: True when generation_data is available
+          * validation_complete: True when validation_data is available
+        - If completion flag not set after reasonable time, log error and retry once
+        - If retry fails, terminate workflow and escalate to human
+        - **CRITICAL: When planning_complete == True, you MUST immediately delegate to generator_swarm**
+        - **DO NOT stop the workflow after planning - ALWAYS continue to generation**
         
         Instructions:
         - Delegate one agent at a time, do not call agents in parallel
@@ -325,6 +354,59 @@ class CustomSupervisorAgent(BaseAgent):
                     )
                     return state
                 
+                # NEW: Parse planner data from message history if not already set
+                if (not state.planner_data and state.messages):
+                    
+                    parsed_planner_data = self._parse_planner_data_from_tool_message(state.messages)
+                    if parsed_planner_data:
+                        state.planner_data = parsed_planner_data
+                        
+                        # Set current_agent to planner_sub_supervisor since we have planner data
+                        state.current_agent = "planner"
+                        
+                        # Check if planning is complete and update workflow state accordingly
+                        if (parsed_planner_data.get("planning_complete", False) and 
+                            not state.workflow_state.planning_complete):
+                            
+                            # Mark planning phase as complete
+                            state.workflow_state.set_phase_complete("planning")
+                            
+                            # Set up agent handoff to next phase
+                            state.workflow_state.set_agent_handoff(
+                                from_agent="planner_sub_supervisor",
+                                to_agent="generator_swarm",
+                                reason="Planning complete, proceeding to generation"
+                            )
+                            
+                            supervisor_logger.log_structured(
+                                level="INFO",
+                                message="Successfully parsed planner data and updated workflow state - planning complete",
+                                extra={
+                                    "planner_data_keys": list(parsed_planner_data.keys()) if parsed_planner_data else [],
+                                    "planning_complete": True,
+                                    "current_agent": state.current_agent,
+                                    "next_agent": "generator_swarm",
+                                    "workflow_phase_updated": True
+                                }
+                            )
+                        else:
+                            supervisor_logger.log_structured(
+                                level="INFO",
+                                message="Successfully parsed planner data from message history",
+                                extra={
+                                    "planner_data_keys": list(parsed_planner_data.keys()) if parsed_planner_data else [],
+                                    "planning_complete": parsed_planner_data.get("planning_complete", False),
+                                    "current_agent": state.current_agent,
+                                    "workflow_phase_updated": False
+                                }
+                            )
+                    else:
+                        supervisor_logger.log_structured(
+                            level="DEBUG",
+                            message="No planner data found in message history",
+                            extra={"current_agent": state.current_agent}
+                        )
+                
                 # Process agent completions and update workflow state
                 self._process_agent_completions(state)
                 
@@ -333,9 +415,7 @@ class CustomSupervisorAgent(BaseAgent):
                     self._prepare_next_phase(state)
                 
                 # CRITICAL: Add explicit completion context for LLM when planning is complete
-                if (state.workflow_state.planning_complete and 
-                    not state.workflow_state.generation_complete and
-                    state.current_agent is None):
+                if (state.workflow_state.planning_complete and not state.workflow_state.generation_complete):
                     
                     completion_context = f"""PLANNING PHASE COMPLETE:
 planning_complete = True
@@ -358,40 +438,6 @@ The planning workflow is complete and you must proceed to the generation phase."
                             "current_agent": state.current_agent
                         }
                     )
-                
-                # CRITICAL: Handle planner sub-supervisor completion handoff
-                elif (state.current_agent == "planner_sub_supervisor" and 
-                      state.workflow_state.planning_complete):
-                    
-                    completion_context = f"""PLANNER SUB-SUPERVISOR COMPLETION DETECTED:
-planning_complete = True
-current_agent = {state.current_agent}
-current_phase = {state.workflow_state.current_phase}
-
-MANDATORY ACTION: You MUST delegate to generator_swarm to generate the Terraform code.
-DO NOT delegate back to planner_sub_supervisor.
-The planner sub-supervisor has completed its work and is returning control."""
-                    
-                    # Set explicit completion context for LLM
-                    state.llm_input_messages = [HumanMessage(content=completion_context)]
-                    
-                    supervisor_logger.log_structured(
-                        level="INFO",
-                        message="Added explicit completion context for LLM - planner sub-supervisor completion",
-                        extra={
-                            "planning_complete": state.workflow_state.planning_complete,
-                            "current_agent": state.current_agent,
-                            "current_phase": state.workflow_state.current_phase
-                        }
-                    )
-                
-                # Ensure llm_input_messages is populated for langgraph-supervisor
-                elif not state.llm_input_messages and state.messages:
-                    # Use the last human message as LLM input
-                    for message in reversed(state.messages):
-                        if hasattr(message, 'content') and message.content:
-                            state.llm_input_messages = [message]
-                            break
                 
                 return state
                 
@@ -440,9 +486,6 @@ The planner sub-supervisor has completed its work and is returning control."""
         
         return supervisor_graph
     
-
-    
-
     
     def _transform_state_for_agent(self, agent_name: str, supervisor_state: SupervisorState, task_description: str) -> Dict[str, Any]:
         """
@@ -653,6 +696,120 @@ The planner sub-supervisor has completed its work and is returning control."""
         # Check for edited module or completion status
         return (editor_data.get("edited_module") is not None or
                 editor_data.get("status") == "completed")
+    
+    def _parse_planner_data_from_tool_message(self, messages: List[AnyMessage]) -> Optional[Dict[str, Any]]:
+        """
+        Parse planner data from the mark_planning_complete tool message.
+        
+        Looks for the last ToolMessage with name='mark_planning_complete' and
+        parses its content as planner data.
+        
+        Args:
+            messages: List of messages from the state
+            
+        Returns:
+            Parsed planner data dictionary or None if not found/invalid
+        """
+        try:
+            # Find the last ToolMessage with name='mark_planning_complete'
+            planner_tool_message = None
+            for message in reversed(messages):
+                if (hasattr(message, 'name') and 
+                    message.name == 'mark_planning_complete' and
+                    hasattr(message, 'content')):
+                    planner_tool_message = message
+                    break
+            
+            if not planner_tool_message:
+                supervisor_logger.log_structured(
+                    level="DEBUG",
+                    message="No mark_planning_complete tool message found in message history",
+                    extra={"total_messages": len(messages)}
+                )
+                return None
+            
+            # Parse the content as a dictionary
+            content = planner_tool_message.content
+            if not content or not isinstance(content, str):
+                supervisor_logger.log_structured(
+                    level="WARNING",
+                    message="Tool message content is empty or not a string",
+                    extra={"content_type": type(content).__name__}
+                )
+                return None
+            
+            # Try to parse the content as a dictionary
+            # Since we now use model_dump(mode='json'), the content should be valid JSON
+            try:
+                parsed_data = json.loads(content)
+                if isinstance(parsed_data, dict):
+                    supervisor_logger.log_structured(
+                        level="INFO",
+                        message="Successfully parsed planner data from tool message using JSON",
+                        extra={
+                            "data_keys": list(parsed_data.keys()) if parsed_data else [],
+                            "has_requirements_data": bool(parsed_data.get("requirements_data")),
+                            "has_execution_data": bool(parsed_data.get("execution_data")),
+                            "has_planning_results": bool(parsed_data.get("planning_results")),
+                            "planning_complete": parsed_data.get("planning_complete", False)
+                        }
+                    )
+                    return parsed_data
+                else:
+                    supervisor_logger.log_structured(
+                        level="WARNING",
+                        message="JSON parsed content is not a dictionary",
+                        extra={"parsed_type": type(parsed_data).__name__}
+                    )
+                    return None
+                    
+            except (json.JSONDecodeError, TypeError) as json_error:
+                # If JSON parsing fails, try ast.literal_eval as fallback for simple cases
+                try:
+                    parsed_data = ast.literal_eval(content)
+                    if isinstance(parsed_data, dict):
+                        supervisor_logger.log_structured(
+                            level="INFO",
+                            message="Successfully parsed planner data from tool message using ast.literal_eval fallback",
+                            extra={
+                                "data_keys": list(parsed_data.keys()) if parsed_data else [],
+                                "has_requirements_data": bool(parsed_data.get("requirements_data")),
+                                "has_execution_data": bool(parsed_data.get("execution_data")),
+                                "has_planning_results": bool(parsed_data.get("planning_results")),
+                                "planning_complete": parsed_data.get("planning_complete", False)
+                            }
+                        )
+                        return parsed_data
+                    else:
+                        supervisor_logger.log_structured(
+                            level="WARNING",
+                            message="ast.literal_eval parsed content is not a dictionary",
+                            extra={"parsed_type": type(parsed_data).__name__}
+                        )
+                        return None
+                        
+                except (ValueError, SyntaxError) as ast_error:
+                    supervisor_logger.log_structured(
+                        level="ERROR",
+                        message="Failed to parse planner data from tool message content",
+                        extra={
+                            "content_preview": content[:200] + "..." if len(content) > 200 else content,
+                            "json_error": str(json_error),
+                            "ast_error": str(ast_error)
+                        }
+                    )
+                    return None
+                    
+        except Exception as e:
+            supervisor_logger.log_structured(
+                level="ERROR",
+                message="Unexpected error parsing planner data from tool message",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__
+                }
+            )
+            return None
     
     def _should_continue_workflow(self, state: SupervisorState) -> bool:
         """Determine if workflow should continue to next phase."""

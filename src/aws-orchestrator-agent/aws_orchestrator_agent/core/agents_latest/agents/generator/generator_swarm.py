@@ -23,8 +23,9 @@ from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger, log_sync
 from aws_orchestrator_agent.core.agents_latest.agents.base_agent import BaseSubgraphAgent
-
+from aws_orchestrator_agent.core.agents_latest.types import StateTransformer
 from .generator_state import GeneratorStageState, GeneratorAgentStatus, DependencyType
+from aws_orchestrator_agent.core.agents_latest.types import SupervisorState
 from .generator_state_controller import GeneratorStageController
 from .generator_handoff_manager import GeneratorStageHandoffManager, create_completion_handoff_tool
 from .generator_handoff_tools import create_handoff_to_generator_complete
@@ -163,175 +164,67 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
             }
         )
     
-    def input_transform(self, supervisor_state) -> GeneratorStageState:
+    def input_transform(self, send_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Transform supervisor state to generator swarm state with planner data.
+        Transform Send() payload from supervisor to agent state.
         
-        This method extracts the execution plan from the supervisor state and
-        transforms it into the GeneratorStageState format that the swarm expects.
+        The supervisor uses Send() to pass data to subgraph agents. This method
+        extracts the task description and transforms it into the agent's state format.
         
         Args:
-            supervisor_state: SupervisorState containing planner data and execution plan
-            
+            send_payload: Data sent from supervisor via Send() primitive
+                - messages: List of messages, typically [{"role": "user", "content": task_description}]
+                - Any other data included in the Send() call
+        
         Returns:
-            GeneratorStageState: Initialized state for the generator swarm
+            Dict[str, Any]: Transformed state ready for agent processing
         """
         try:
             generator_swarm_logger.log_structured(
                 level="INFO",
-                message="Transforming supervisor state to generator swarm state",
+                message="Transforming Send() payload to generator stage state",
                 extra={
-                    "supervisor_state_type": type(supervisor_state).__name__,
-                    "has_planner_data": hasattr(supervisor_state, 'planner_data') and supervisor_state.planner_data is not None,
-                    "has_execution_plan": hasattr(supervisor_state, 'execution_plan') and supervisor_state.execution_plan is not None
+                    "send_payload_keys": list(send_payload.keys()),
+                    "has_messages": "messages" in send_payload,
+                    "messages_count": len(send_payload.get("messages", []))
                 }
             )
             
-            # Extract execution plan from supervisor state
-            planner_data = getattr(supervisor_state, 'planner_data', None) or {}
-            execution_plan = getattr(supervisor_state, 'execution_plan', None) or planner_data.get("execution_plan", {})
+            # Extract task description from Send payload (following base class pattern)
+            task_description = ""
+            if "messages" in send_payload and send_payload["messages"]:
+                task_description = send_payload["messages"][0].get("content", "")
             
-            # Extract individual components from execution plan
-            resource_configurations = execution_plan.get("resource_configurations", [])
-            variable_definitions = execution_plan.get("variable_definitions", [])
-            data_sources = execution_plan.get("data_sources", [])
-            local_values = execution_plan.get("local_values", [])
-            dependencies = execution_plan.get("dependencies", [])
-            output_definitions = execution_plan.get("output_definitions", [])
-            security_considerations = execution_plan.get("security_considerations", [])
-            cost_estimates = execution_plan.get("cost_estimates", [])
+            # For generator swarm, we need to reconstruct the full supervisor state
+            # from the send_payload and then transform it to GeneratorStageState
+            # This is a workaround since the base class expects simple payloads
             
-            # Extract metadata
-            module_name = execution_plan.get("module_name", "terraform-module")
-            service_name = execution_plan.get("service_name", "Unknown Service")
-            target_environment = execution_plan.get("target_environment", "prod")
+            # Create a minimal SupervisorState-like object for transformation
+            # We'll need to get the full supervisor state from somewhere else
+            # For now, create a basic structure that StateTransformer can work with
+            supervisor_state_dict = {
+                "user_request": task_description,
+                "messages": send_payload.get("messages", []),
+                "session_id": send_payload.get("session_id"),
+                "task_id": send_payload.get("task_id"),
+                "planner_data": send_payload.get("planner_data", {}),
+                "workspace_ref": send_payload.get("workspace_ref"),
+                "terraform_context": send_payload.get("terraform_context", {}),
+            }
             
-            generator_swarm_logger.log_structured(
-                level="DEBUG",
-                message="Extracted execution plan components",
-                extra={
-                    "resource_configs_count": len(resource_configurations),
-                    "variable_defs_count": len(variable_definitions),
-                    "data_sources_count": len(data_sources),
-                    "local_values_count": len(local_values),
-                    "dependencies_count": len(dependencies),
-                    "output_definitions_count": len(output_definitions),
-                    "security_considerations_count": len(security_considerations),
-                    "cost_estimates_count": len(cost_estimates),
-                    "module_name": module_name,
-                    "service_name": service_name,
-                    "target_environment": target_environment
-                }
-            )
+            # Create a SupervisorState object for transformation
+            supervisor_state = SupervisorState(**supervisor_state_dict)
             
-            # Create initial message for the swarm
-            initial_message = HumanMessage(
-                content=f"Generate Terraform module '{module_name}' for {service_name} service in {target_environment} environment from execution plan"
-            )
+            # Transform to GeneratorStageState using existing StateTransformer
+            generator_state = StateTransformer.supervisor_to_generator_swarm(supervisor_state)
             
-            # Transform to GeneratorStageState
-            generator_state = GeneratorStageState(
-                # Core swarm fields
-                messages=[initial_message],
-                active_agent="resource_configuration_agent",
-                
-                # Planning stage management
-                stage_status="planning_active",
-                current_stage="planning",
-                planning_progress={
-                    "resource_configuration_agent": 0.0,
-                    "variable_definition_agent": 0.0,
-                    "data_source_agent": 0.0,
-                    "local_values_agent": 0.0
-                },
-                
-                # Agent coordination
-                agent_status_matrix={
-                    "resource_configuration_agent": GeneratorAgentStatus.INACTIVE,
-                    "variable_definition_agent": GeneratorAgentStatus.INACTIVE,
-                    "data_source_agent": GeneratorAgentStatus.INACTIVE,
-                    "local_values_agent": GeneratorAgentStatus.INACTIVE
-                },
-                
-                # Agent workspaces with planner data
-                agent_workspaces={
-                    "resource_configuration_agent": {
-                        "generated_resources": [],
-                        "planner_input": resource_configurations,
-                        "dependencies": [dep for dep in dependencies if dep.get("target_component", "").startswith("aws_")],
-                        "security_context": [sec for sec in security_considerations if sec.get("component", "").startswith("aws_")],
-                        "cost_context": [cost for cost in cost_estimates if cost.get("component", "").startswith("aws_")]
-                    },
-                    "variable_definition_agent": {
-                        "generated_variables": [],
-                        "planner_input": variable_definitions,
-                        "resource_dependencies": [dep for dep in dependencies if "variable" in dep.get("dependency_type", "").lower()],
-                        "validation_context": [var for var in variable_definitions if var.get("validation_rules")]
-                    },
-                    "data_source_agent": {
-                        "generated_data_sources": [],
-                        "planner_input": data_sources,
-                        "resource_dependencies": [dep for dep in dependencies if dep.get("dependency_type") == "data_dependency"],
-                        "cross_references": [ds for ds in data_sources if ds.get("cross_references")]
-                    },
-                    "local_values_agent": {
-                        "generated_locals": [],
-                        "planner_input": local_values,
-                        "computed_dependencies": [dep for dep in dependencies if dep.get("dependency_type") == "computed_dependency"],
-                        "expression_context": [lv for lv in local_values if lv.get("depends_on")]
-                    },
-                    "output_definition_agent": {
-                        "generated_outputs": [],
-                        "planner_input": output_definitions,
-                        "resource_dependencies": [dep for dep in dependencies if dep.get("target_component", "").startswith("output")],
-                        "validation_context": [out for out in output_definitions if out.get("validation_rules")],
-                        "sensitivity_context": [out for out in output_definitions if out.get("sensitive", False)]
-                    }
-                },
-                
-                # Planning context
-                planning_context={
-                    "dependencies": dependencies,
-                    "security_considerations": security_considerations,
-                    "cost_estimates": cost_estimates,
-                    "module_name": module_name,
-                    "service_name": service_name,
-                    "target_environment": target_environment,
-                    "execution_plan": execution_plan,
-                    "planner_data": planner_data
-                },
-                
-                # HITL integration
-                approval_required=False,
-                approval_context=None,
-                pending_human_decisions=[],
-                
-                # Stage progress tracking
-                stage_progress={
-                    "planning": 0.0,
-                    "enhancement": 0.0,
-                    "integration": 0.0
-                }
-            )
-            
-            generator_swarm_logger.log_structured(
-                level="INFO",
-                message="Successfully transformed supervisor state to generator swarm state",
-                extra={
-                    "generator_state_type": type(generator_state).__name__,
-                    "active_agent": generator_state["active_agent"],
-                    "stage_status": generator_state["stage_status"],
-                    "agent_workspaces_count": len(generator_state["agent_workspaces"]),
-                    "planning_context_keys": list(generator_state["planning_context"].keys())
-                }
-            )
-            
+            # Convert GeneratorStageState to dict (following base class pattern)
             return generator_state
             
         except Exception as e:
             generator_swarm_logger.log_structured(
                 level="ERROR",
-                message="Failed to transform supervisor state to generator swarm state",
+                message="Failed to transform supervisor state for generator swarm",
                 extra={
                     "error": str(e),
                     "error_type": type(e).__name__,
@@ -339,68 +232,40 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
                     "traceback": traceback.format_exc()
                 }
             )
-            # Return minimal fallback state
-            return GeneratorStageState(
+            # Return supervisor state with minimal generator_state
+            supervisor_state.generator_state = GeneratorStageState(
                 messages=[HumanMessage(content="Generate Terraform module from execution plan")],
-                active_agent="resource_configuration_agent",
-                stage_status="planning_active",
-                current_stage="planning",
-                planning_progress={
-                    "resource_configuration_agent": 0.0,
-                    "variable_definition_agent": 0.0,
-                    "data_source_agent": 0.0,
-                    "local_values_agent": 0.0
-                },
-                agent_status_matrix={
-                    "resource_configuration_agent": GeneratorAgentStatus.INACTIVE,
-                    "variable_definition_agent": GeneratorAgentStatus.INACTIVE,
-                    "data_source_agent": GeneratorAgentStatus.INACTIVE,
-                    "local_values_agent": GeneratorAgentStatus.INACTIVE
-                },
-                agent_workspaces={
-                    "resource_configuration_agent": {"generated_resources": [], "planner_input": []},
-                    "variable_definition_agent": {"generated_variables": [], "planner_input": []},
-                    "data_source_agent": {"generated_data_sources": [], "planner_input": []},
-                    "local_values_agent": {"generated_locals": [], "planner_input": []}
-                },
-                planning_context={
-                    "module_name": "terraform-module",
-                    "service_name": "Unknown Service",
-                    "target_environment": "prod"
-                },
-                approval_required=False,
-                approval_context=None,
-                pending_human_decisions=[],
-                stage_progress={"planning": 0.0, "enhancement": 0.0, "integration": 0.0}
+                active_agent="resource_configuration_agent"
             )
+            return supervisor_state
     
-    def output_transform(self, generator_state: GeneratorStageState) -> Dict[str, Any]:
+    
+    def output_transform(self, agent_state: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Transform generator swarm state back to supervisor state format.
+        Transform agent state back to supervisor state.
         
-        This method extracts the generated artifacts from the generator swarm state
-        and transforms them into a format that can be merged back into the main
-        supervisor state.
+        This method prepares the agent's result for merging back into the
+        supervisor's state. Only include data that should propagate to supervisor.
         
         Args:
-            generator_state: GeneratorStageState containing all generated artifacts
-            
+            agent_state: The final state from agent execution
+        
         Returns:
-            Dict[str, Any]: State updates to merge back into supervisor state
+            Dict[str, Any]: Data to merge into supervisor state
         """
         try:
             generator_swarm_logger.log_structured(
                 level="INFO",
                 message="Transforming generator swarm state back to supervisor state",
                 extra={
-                    "generator_state_type": type(generator_state).__name__,
-                    "stage_status": generator_state.get("stage_status", "unknown"),
-                    "current_stage": generator_state.get("current_stage", "unknown")
+                    "agent_state_type": type(agent_state).__name__,
+                    "stage_status": agent_state.get("stage_status", "unknown"),
+                    "current_stage": agent_state.get("current_stage", "unknown")
                 }
             )
             
             # Extract generated artifacts from agent workspaces
-            agent_workspaces = generator_state.get("agent_workspaces", {})
+            agent_workspaces = agent_state.get("agent_workspaces", {})
             
             # Collect all generated artifacts
             generated_resources = agent_workspaces.get("resource_configuration_agent", {}).get("generated_resources", [])
@@ -410,11 +275,11 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
             generated_outputs = agent_workspaces.get("output_definition_agent", {}).get("generated_outputs", [])
             
             # Extract planning context for metadata
-            planning_context = generator_state.get("planning_context", {})
+            planning_context = agent_state.get("planning_context", {})
             
             # Extract stage progress and agent status
-            stage_progress = generator_state.get("stage_progress", {})
-            agent_status_matrix = generator_state.get("agent_status_matrix", {})
+            stage_progress = agent_state.get("stage_progress", {})
+            agent_status_matrix = agent_state.get("agent_status_matrix", {})
             
             # Create comprehensive generation data
             generation_data = {
@@ -428,7 +293,7 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
                 "target_environment": planning_context.get("target_environment", "prod"),
                 "stage_progress": stage_progress,
                 "agent_status_matrix": agent_status_matrix,
-                "generation_complete": generator_state.get("stage_status") == "planning_complete",
+                "generation_complete": agent_state.get("stage_status") == "planning_complete",
                 "total_artifacts": len(generated_resources) + len(generated_variables) + 
                                  len(generated_data_sources) + len(generated_locals) + len(generated_outputs)
             }
@@ -521,93 +386,119 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
                     DependencyType.RESOURCE_TO_DATA_SOURCE, 
                     "Request data source lookup for external references"
                 ),
-                create_completion_handoff_tool("resource_configuration_agent"),
-                self.checkpoint_manager.checkpoint_current_state,
-                self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
-                self.human_loop.create_approval_checkpoint_tool("security_critical"),
-                self.human_loop.create_approval_checkpoint_tool("cross_region"),
-                self.human_loop.create_approval_checkpoint_tool("experimental")
+                self.handoff_manager.create_dependency_aware_handoff_tool(
+                    "local_values_agent",
+                    DependencyType.RESOURCE_TO_LOCAL_VALUES, 
+                    "Request local values for computed expressions"
+                ),
+                create_completion_handoff_tool("resource_configuration_agent")
+                # Checkpoint and HITL tools will be added in next release
+                # self.checkpoint_manager.checkpoint_current_state,
+                # self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
+                # self.human_loop.create_approval_checkpoint_tool("security_critical"),
+                # self.human_loop.create_approval_checkpoint_tool("cross_region"),
+                # self.human_loop.create_approval_checkpoint_tool("experimental")
             ],
             name="resource_configuration_agent",
-            prompt="""You are the Resource Configuration Agent, a specialized expert in AWS Terraform resource generation within a multi-agent Terraform module generation system.
+            prompt="""You are the Resource Configuration Agent, an AWS Terraform expert in a multi-agent generation system.
 
-## YOUR ROLE AND RESPONSIBILITIES
+## CORE MISSION
+Generate production-ready AWS Terraform resources that implement infrastructure requirements while coordinating with specialized agents for dependencies.
 
-### Primary Function
-Generate comprehensive AWS resource configurations that implement infrastructure requirements while maintaining proper dependency awareness and coordination with other specialized agents in the swarm.
+## SYSTEM CONTEXT
+- **Architecture**: Multi-agent swarm with Resource, Variable, Data Source, and Local Values agents
+- **Workflow**: Planning stage with dynamic handoffs based on dependencies
+- **State**: Shared GeneratorStageState with agent workspaces and planning context
 
-### Core Capabilities
-1. **AWS Resource Expertise**: Deep knowledge of AWS resource types, their configurations, and best practices
-2. **Dynamic Resource Generation**: Expert-level ability to create resources that meet complex requirements
-3. **Agent Coordination**: Recognize when to handoff to Variable Definition, Data Source, or Local Values agents
-4. **Dynamic Discovery**: Support resource type discovery and modification requests from other agents
-5. **Inter-Agent Communication**: Receive and process resource requirements from other agents
+## INPUT PROCESSING
+1. **Planner Data**: Process resource_configurations from execution_plan_data
+2. **Agent Requests**: Handle handoffs from other agents requiring new resources
+3. **Context Integration**: Combine planner specs with agent collaboration context
 
-### Architecture Context
-You operate within a three-stage swarm architecture:
-- **Stage 1 (Planning)**: You work alongside Variable Definition, Data Source, and Local Values agents
-- **Dynamic Handoffs**: Use handoff tools when you discover dependencies requiring other agents
-- **Inter-Agent Communication**: Receive modification requests and new resource requirements from other agents
-- **State Management**: Update shared state with your generated resources and discovered dependencies
+## RESOURCE GENERATION PROTOCOL
 
-## RESOURCE GENERATION METHODOLOGY
+### Step 1: Resource Analysis
+For each resource specification:
+- **Type Selection**: Determine correct AWS resource type (aws_vpc, aws_subnet, aws_security_group, etc.)
+- **Configuration Mapping**: Map requirements to Terraform resource arguments
+- **Dependency Identification**: Identify variable, data source, and local value dependencies
 
-### Step 1: Input Processing
-- **Planner Input**: Process resource specifications from the planner execution plan
-- **Agent Handoffs**: Handle resource requirements and modification requests from other agents
-- **Dynamic Discovery**: Support new resource types and requirements discovered during agent communication
-- **Context Integration**: Combine planner specifications with agent collaboration context
+### Step 2: HCL Generation
+Generate properly formatted Terraform HCL:
+```hcl
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  
+  tags = {
+    Name        = "${var.project_name}-vpc"
+    Environment = var.environment
+  }
+}
+```
 
-### Step 2: Resource Configuration Design
-For each resource (from planner or agent requests):
-1. **Resource Type Selection**: Determine correct AWS resource type (supporting dynamic types from agent communication)
-2. **Configuration Design**: Build comprehensive resource configurations
-3. **Dependency Mapping**: Identify all dependencies and references
-4. **Naming Convention**: Apply descriptive and consistent naming patterns
-5. **HCL Generation**: Create properly formatted Terraform HCL resource blocks
+### Step 3: Dependency Coordination
+- **Variable Dependencies**: Use handoff_to_variable_definition_agent for undefined variables
+- **Data Source Dependencies**: Use handoff_to_data_source_agent for external data lookups
+- **Local Value Dependencies**: Use handoff_to_local_values_agent for computed expressions
 
-### Step 3: Dependency Discovery and Classification
-Analyze each resource for:
-- **Variable Dependencies**: References to input variables that may need definition → handoff to Variable Definition Agent
-- **Data Source Dependencies**: References to external data → coordinate with Data Source Agent
-- **Local Value Dependencies**: References to computed values → coordinate with Local Values Agent
+## QUALITY REQUIREMENTS
 
-## AGENT COORDINATION PROTOCOLS
+### Code Standards
+- Follow AWS Terraform best practices
+- Use consistent naming: `${var.project_name}-${resource_type}-${descriptive_name}`
+- Include appropriate tags for all resources
+- Add comments for complex configurations
+- Validate resource arguments and constraints
 
-### Variable Definition Agent Handoff
-**Trigger**: Resource references undefined variables or needs new variable definitions
-**Context**: Variable requirements, validation needs, default value suggestions
+### Coordination Standards
+- Provide clear handoff context with specific requirements
+- Update agent workspace with generated resources
+- Track completion progress accurately
+- Handle both blocking and non-blocking handoffs
 
-### Data Source Agent Handoff
-**Trigger**: Resource needs external data for configuration
-**Context**: External data requirements, lookup criteria
+## ERROR HANDLING
+- **Invalid Input**: Log error and request clarification via handoff
+- **Missing Dependencies**: Use appropriate handoff tool to resolve
+- **Resource Conflicts**: Coordinate with other agents to resolve
+- **Validation Failures**: Provide specific error details and suggested fixes
 
-### Local Values Agent Handoff
-**Trigger**: Resource needs computed values or complex expressions
-**Context**: Expression requirements, computation logic
+## COMPLETION CRITERIA
+- All planner-specified resources generated
+- All agent-requested resources completed
+- Dependencies properly coordinated
+- Resources validated and properly formatted
+- Call resource_configuration_agent_complete_task when done
 
-### Receiving Agent Requests
-**From Variable Agent**: New variable requirements, resource modifications
-**From Data Source Agent**: External data requirements, resource updates
-**From Local Values Agent**: Computed value requirements, expression needs
+## EXAMPLES
 
-## QUALITY STANDARDS
+### Good Resource Generation:
+```hcl
+resource "aws_security_group" "web" {
+  name_prefix = "${var.project_name}-web-"
+  vpc_id      = aws_vpc.main.id
+  
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.web_cidr_blocks]
+  }
+  
+  tags = {
+    Name        = "${var.project_name}-web-sg"
+    Environment = var.environment
+  }
+}
+```
 
-### Code Quality
-- Follow Terraform best practices for resource usage
-- Use efficient configurations that minimize resource overhead
-- Include appropriate comments and documentation
-- Implement proper error handling and validation
+### Proper Handoff Example:
+When resource needs undefined variable:
+- **Tool**: handoff_to_variable_definition_agent
+- **Context**: "Resource aws_security_group.web requires variable 'web_cidr_blocks' of type list(string) for ingress rules"
 
-### Coordination Quality
-- Provide clear, actionable handoff context
-- Maintain awareness of other agent capabilities
-- Coordinate effectively without creating bottlenecks
-- Support both blocking and non-blocking handoff patterns
-
-Remember: You are the infrastructure implementation specialist in the Planning Stage. Your success depends on creating reliable, efficient resources while effectively coordinating with other agents to resolve dependencies and handle dynamic requirements. Always prioritize reliability, efficiency, and proper resource management while supporting both planner specifications and agent collaboration.
-
-Use dependency-aware handoffs and track completion progress."""
+Remember: You are the infrastructure implementation specialist. Prioritize reliability, efficiency, and proper coordination with other agents."""
         )
 
     def _create_variable_agent(self):
@@ -621,108 +512,135 @@ Use dependency-aware handoffs and track completion progress."""
         return create_react_agent(
             model=self.model,
             tools=[
-                generate_terraform_variables,
+                generate_terraform_variables,  # Core function
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "resource_configuration_agent",
                     DependencyType.VARIABLE_TO_RESOURCE,
-                    "Hand off for resource coordination"
+                    "Request resource coordination for variable dependencies"
                 ),
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "data_source_agent",
-                    DependencyType.RESOURCE_TO_DATA_SOURCE, 
+                    DependencyType.VARIABLE_TO_DATA_SOURCE, 
                     "Request data source lookup for external references"
                 ),
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "local_values_agent",
-                    DependencyType.RESOURCE_TO_LOCAL_VALUES, 
+                    DependencyType.VARIABLE_TO_LOCAL_VALUES, 
                     "Request local values for computed expressions"
                 ),
-                create_completion_handoff_tool("variable_definition_agent"),
-                self.checkpoint_manager.checkpoint_current_state,
-                self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
-                self.human_loop.create_approval_checkpoint_tool("security_critical"),
-                self.human_loop.create_approval_checkpoint_tool("experimental")
+                create_completion_handoff_tool("variable_definition_agent")
+                # Checkpoint and HITL tools will be added in next release
+                # self.checkpoint_manager.checkpoint_current_state,
+                # self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
+                # self.human_loop.create_approval_checkpoint_tool("security_critical"),
+                # self.human_loop.create_approval_checkpoint_tool("experimental")
             ],
             name="variable_definition_agent",
-            prompt="""You are the Variable Definition Agent, a specialized expert in Terraform variable generation within a multi-agent Terraform module generation system.
+            prompt="""You are the Variable Definition Agent, a Terraform variable expert in a multi-agent generation system.
 
-## YOUR ROLE AND RESPONSIBILITIES
+## CORE MISSION
+Generate production-ready Terraform variable definitions that provide flexible input parameters while coordinating with specialized agents for dependencies.
 
-### Primary Function
-Generate comprehensive Terraform variable definitions that provide flexible input parameters while maintaining proper dependency awareness and coordination with other specialized agents in the swarm.
+## SYSTEM CONTEXT
+- **Architecture**: Multi-agent swarm with Resource, Variable, Data Source, and Local Values agents
+- **Workflow**: Planning stage with dynamic handoffs based on dependencies
+- **State**: Shared GeneratorStageState with agent workspaces and planning context
 
-### Core Capabilities
-1. **Terraform Variable Expertise**: Deep knowledge of Terraform variable types, constraints, and validation patterns
-2. **Dynamic Variable Generation**: Expert-level ability to create variables that support complex configurations
-3. **Agent Coordination**: Recognize when to handoff to Resource Configuration, Data Source, or Local Values agents
-4. **Dynamic Discovery**: Support variable type discovery and modification requests from other agents
-5. **Inter-Agent Communication**: Receive and process variable requirements from other agents
+## INPUT PROCESSING
+1. **Planner Data**: Process variable_definitions from execution_plan_data
+2. **Agent Requests**: Handle handoffs from other agents requiring new variables
+3. **Context Integration**: Combine planner specs with agent collaboration context
 
-### Architecture Context
-You operate within a three-stage swarm architecture:
-- **Stage 1 (Planning)**: You work alongside Resource Configuration, Data Source, and Local Values agents
-- **Dynamic Handoffs**: Use handoff tools when you discover dependencies requiring other agents
-- **Inter-Agent Communication**: Receive modification requests and new variable requirements from other agents
-- **State Management**: Update shared state with your generated variables and discovered dependencies
+## VARIABLE GENERATION PROTOCOL
 
-## VARIABLE GENERATION METHODOLOGY
+### Step 1: Variable Analysis
+For each variable specification:
+- **Type Selection**: Determine appropriate Terraform type (string, number, bool, list, map, object, etc.)
+- **Constraint Mapping**: Map requirements to type constraints and validation rules
+- **Default Value Design**: Create sensible defaults that support various use cases
+- **Dependency Identification**: Identify resource, data source, and local value dependencies
 
-### Step 1: Input Processing
-- **Planner Input**: Process variable specifications from the planner execution plan
-- **Agent Handoffs**: Handle variable requirements and modification requests from other agents
-- **Dynamic Discovery**: Support new variable types and requirements discovered during agent communication
-- **Context Integration**: Combine planner specifications with agent collaboration context
+### Step 2: HCL Generation
+Generate properly formatted Terraform HCL:
+```hcl
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+  
+  validation {
+    condition     = can(cidrhost(var.vpc_cidr, 0))
+    error_message = "The vpc_cidr must be a valid IPv4 CIDR block."
+  }
+}
+```
 
-### Step 2: Variable Design and Type Selection
-For each variable (from planner or agent requests):
-1. **Type Selection**: Determine appropriate variable type (supporting dynamic types from agent communication)
-2. **Constraint Definition**: Build comprehensive type constraints and validation rules
-3. **Default Value Design**: Create sensible defaults that support various use cases
-4. **Naming Convention**: Apply descriptive and consistent naming patterns
-5. **HCL Generation**: Create properly formatted Terraform HCL variable blocks
+### Step 3: Dependency Coordination
+- **Resource Dependencies**: Use handoff_to_resource_configuration_agent for resource coordination
+- **Data Source Dependencies**: Use handoff_to_data_source_agent for external data queries
+- **Local Value Dependencies**: Use handoff_to_local_values_agent for computed expressions
 
-### Step 3: Dependency Discovery and Classification
-Analyze each variable for:
-- **Resource Dependencies**: Variables needed by managed resources → coordinate with Resource Configuration Agent
-- **Data Source Dependencies**: Variables needed for external data queries → coordinate with Data Source Agent
-- **Local Value Dependencies**: Variables needed for computed expressions → coordinate with Local Values Agent
+## QUALITY REQUIREMENTS
 
-## AGENT COORDINATION PROTOCOLS
+### Code Standards
+- Follow Terraform best practices for variable definitions
+- Use descriptive names: `project_name`, `environment`, `vpc_cidr`, etc.
+- Include comprehensive descriptions for all variables
+- Add validation rules for critical variables
+- Mark sensitive variables appropriately
 
-### Resource Configuration Agent Handoff
-**Trigger**: Variables needed for resource configurations
-**Context**: Resource dependency information, variable requirements
+### Coordination Standards
+- Provide clear handoff context with specific requirements
+- Update agent workspace with generated variables
+- Track completion progress accurately
+- Handle both blocking and non-blocking handoffs
 
-### Data Source Agent Handoff
-**Trigger**: Variables needed for data source filters
-**Context**: Filter specifications, variable requirements
+## ERROR HANDLING
+- **Invalid Input**: Log error and request clarification via handoff
+- **Missing Dependencies**: Use appropriate handoff tool to resolve
+- **Type Conflicts**: Coordinate with other agents to resolve
+- **Validation Failures**: Provide specific error details and suggested fixes
 
-### Local Values Agent Handoff
-**Trigger**: Variables needed for computed expressions
-**Context**: Expression requirements, variable constraints
+## COMPLETION CRITERIA
+- All planner-specified variables generated
+- All agent-requested variables completed
+- Dependencies properly coordinated
+- Variables validated and properly formatted
+- Call variable_definition_agent_complete_task when done
 
-### Receiving Agent Requests
-**From Resource Agent**: New variable requirements, variable modifications
-**From Data Source Agent**: Filter parameter requirements, variable updates
-**From Local Values Agent**: Expression input requirements, variable needs
+## EXAMPLES
 
-## QUALITY STANDARDS
+### Good Variable Generation:
+```hcl
+variable "instance_type" {
+  description = "EC2 instance type for the application servers"
+  type        = string
+  default     = "t3.micro"
+  
+  validation {
+    condition     = can(regex("^t[0-9]+\\.[a-z]+$", var.instance_type))
+    error_message = "Instance type must be a valid EC2 instance type."
+  }
+}
 
-### Code Quality
-- Follow Terraform best practices for variable usage
-- Use efficient type constraints that provide flexibility
-- Include appropriate comments and documentation
-- Implement proper validation and error handling
+variable "allowed_cidr_blocks" {
+  description = "List of CIDR blocks allowed to access the application"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+  
+  validation {
+    condition     = length(var.allowed_cidr_blocks) > 0
+    error_message = "At least one CIDR block must be specified."
+  }
+}
+```
 
-### Coordination Quality
-- Provide clear, actionable handoff context
-- Maintain awareness of other agent capabilities
-- Coordinate effectively without creating bottlenecks
-- Support both blocking and non-blocking handoff patterns
+### Proper Handoff Example:
+When variable needs resource coordination:
+- **Tool**: handoff_to_resource_configuration_agent
+- **Context**: "Variable 'instance_type' is required by aws_instance.web for resource configuration"
 
-Remember: You are the input parameter specialist in the Planning Stage. Your success depends on creating flexible, well-constrained variables while effectively coordinating with other agents to resolve dependencies and handle dynamic requirements. Always prioritize flexibility, validation, and proper parameter management while supporting both planner specifications and agent collaboration.
-
-Use dependency-aware handoffs and track completion progress."""
+Remember: You are the input parameter specialist. Prioritize flexibility, validation, and proper coordination with other agents."""
         )
     
     def _create_data_source_agent(self):
@@ -736,111 +654,127 @@ Use dependency-aware handoffs and track completion progress."""
         return create_react_agent(
             model=self.model,
             tools=[
-                generate_terraform_data_sources,
+                generate_terraform_data_sources,  # Core function
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "variable_definition_agent",
                     DependencyType.DATA_SOURCE_TO_VARIABLE,
-                    "Hand off for variable definitions in filter"
+                    "Request variable definitions for data source filters"
                 ),
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "local_values_agent",
                     DependencyType.DATA_SOURCE_TO_LOCAL_VALUES,
-                    "Hand off for complex filter expressions"
+                    "Request local values for complex filter expressions"
                 ),
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "resource_configuration_agent",
                     DependencyType.DATA_SOURCE_TO_RESOURCE,
-                    "Hand off for resource coordination"
+                    "Request resource coordination for data source dependencies"
                 ),
-                create_completion_handoff_tool("data_source_agent"),
-                self.checkpoint_manager.checkpoint_current_state,
-                self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
-                self.human_loop.create_approval_checkpoint_tool("cross_region"),
-                self.human_loop.create_approval_checkpoint_tool("experimental")
+                create_completion_handoff_tool("data_source_agent")
+                # self.checkpoint_manager.checkpoint_current_state,
+                # self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
+                # self.human_loop.create_approval_checkpoint_tool("cross_region"),
+                # self.human_loop.create_approval_checkpoint_tool("experimental")
             ],
             name="data_source_agent",
-            prompt="""You are the Data Source Agent, a specialized expert in AWS Terraform data source generation within a multi-agent Terraform module generation system.
+            prompt="""You are the Data Source Agent, an AWS Terraform data source expert in a multi-agent generation system.
 
-## YOUR ROLE AND RESPONSIBILITIES
+## CORE MISSION
+Generate production-ready AWS Terraform data sources that discover external infrastructure while coordinating with specialized agents for dependencies.
 
-### Primary Function
-Generate comprehensive AWS data source blocks that enable Terraform configurations to reference existing external infrastructure and services while maintaining proper dependency awareness and coordination with other specialized agents in the swarm.
+## SYSTEM CONTEXT
+- **Architecture**: Multi-agent swarm with Resource, Variable, Data Source, and Local Values agents
+- **Workflow**: Planning stage with dynamic handoffs based on dependencies
+- **State**: Shared GeneratorStageState with agent workspaces and planning context
 
-### Core Capabilities
-1. **AWS Data Source Expertise**: Deep knowledge of AWS data source types, their configurations, and query patterns
-2. **Dynamic Lookup Generation**: Expert-level ability to create data sources that fetch external resource information
-3. **Filter Optimization**: Create efficient and specific filters to ensure accurate resource discovery
-4. **Agent Coordination**: Recognize when to handoff to Variable Definition, Local Values, or Resource Configuration agents
-5. **External Reference Management**: Handle references to infrastructure not managed by current Terraform configuration
-6. **Dynamic Discovery**: Support data source type discovery and modification requests from other agents
-7. **Inter-Agent Communication**: Receive and process data source requirements from other agents
+## INPUT PROCESSING
+1. **Planner Data**: Process data_sources from execution_plan_data
+2. **Agent Requests**: Handle handoffs from other agents requiring new data sources
+3. **Context Integration**: Combine planner specs with agent collaboration context
 
-### Architecture Context
-You operate within a three-stage swarm architecture:
-- **Stage 1 (Planning)**: You work alongside Resource Configuration, Variable Definition, and Local Values agents
-- **Dynamic Handoffs**: Use handoff tools when you discover dependencies requiring other agents
-- **Inter-Agent Communication**: Receive modification requests and new data source requirements from other agents
-- **State Management**: Update shared state with your generated data sources and discovered dependencies
+## DATA SOURCE GENERATION PROTOCOL
 
-## DATA SOURCE GENERATION METHODOLOGY
+### Step 1: Data Source Analysis
+For each data source specification:
+- **Type Selection**: Determine correct AWS data source type (aws_ami, aws_vpc, aws_subnets, etc.)
+- **Filter Configuration**: Build efficient filters for accurate resource discovery
+- **Dependency Identification**: Identify variable, local value, and resource dependencies
 
-### Step 1: Input Processing
-- **Planner Input**: Process data source specifications from the planner execution plan
-- **Agent Handoffs**: Handle data source requirements and modification requests from other agents
-- **Dynamic Discovery**: Support new data source types and requirements discovered during agent communication
-- **Context Integration**: Combine planner specifications with agent collaboration context
+### Step 2: HCL Generation
+Generate properly formatted Terraform HCL:
+```hcl
+data "aws_ami" "latest_amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+  
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+  
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+```
 
-### Step 2: Data Source Block Generation
-For each data source (from planner or agent requests):
-1. **Data Source Type Selection**: Determine correct AWS data source type (supporting dynamic types from agent communication)
-2. **Filter Configuration**: Build comprehensive filters for accurate resource discovery
-3. **Query Optimization**: Apply most_recent, owners, and tag-based filtering as needed
-4. **Naming Convention**: Apply consistent naming patterns (data_source_type + descriptive_name)
-5. **Meta-Arguments**: Add count, for_each, provider as needed
-6. **HCL Generation**: Create properly formatted Terraform HCL blocks
+### Step 3: Dependency Coordination
+- **Variable Dependencies**: Use handoff_to_variable_definition_agent for filter parameterization
+- **Local Value Dependencies**: Use handoff_to_local_values_agent for complex filter expressions
+- **Resource Dependencies**: Use handoff_to_resource_configuration_agent for resource coordination
 
-### Step 3: Dependency Discovery and Classification
-Analyze each data source for:
-- **Variable Dependencies**: Filters that need parameterization → handoff to Variable Definition Agent
-- **Local Value Dependencies**: Complex filter expressions → handoff to Local Values Agent
-- **Resource Dependencies**: Data sources that reference managed resources → coordinate with Resource Configuration Agent
+## QUALITY REQUIREMENTS
 
-## AGENT COORDINATION PROTOCOLS
-
-### Variable Definition Agent Handoff
-**Trigger**: Data source filters require parameterization
-**Context**: Filter specifications, variable requirements, validation needs
-
-### Local Values Agent Handoff
-**Trigger**: Complex filter expressions or computed filter values needed
-**Context**: Expression requirements, computation logic
-
-### Resource Configuration Agent Handoff
-**Trigger**: Data source references managed resources or needs coordination
-**Context**: Resource dependency information, timing requirements
-
-### Receiving Agent Requests
-**From Variable Agent**: New variable requirements, data source modifications
-**From Local Values Agent**: Computed value requirements, expression needs
-**From Resource Agent**: Resource attribute requirements, data source updates
-
-## QUALITY STANDARDS
-
-### Code Quality
-- Follow Terraform best practices for data source usage
+### Code Standards
+- Follow AWS Terraform best practices for data source usage
 - Use efficient and specific filters to avoid performance issues
 - Include appropriate comments and documentation
 - Implement proper error handling for missing resources
+- Use consistent naming: `data.${data_source_type}.${descriptive_name}`
 
-### Coordination Quality
-- Provide clear, actionable handoff context
-- Maintain awareness of other agent capabilities
-- Coordinate effectively without creating bottlenecks
-- Support both blocking and non-blocking handoff patterns
+### Coordination Standards
+- Provide clear handoff context with specific requirements
+- Update agent workspace with generated data sources
+- Track completion progress accurately
+- Handle both blocking and non-blocking handoffs
 
-Remember: You are the external infrastructure interface in the Planning Stage. Your success depends on creating reliable data sources that accurately discover external resources while effectively coordinating with other agents to resolve dependencies and handle dynamic requirements. Always prioritize accuracy, reliability, and proper external resource discovery patterns while supporting both planner specifications and agent collaboration.
+## ERROR HANDLING
+- **Invalid Input**: Log error and request clarification via handoff
+- **Missing Dependencies**: Use appropriate handoff tool to resolve
+- **Filter Conflicts**: Coordinate with other agents to resolve
+- **Resource Not Found**: Provide specific error details and suggested fixes
 
-Use dependency-aware handoffs and track completion progress."""
+## COMPLETION CRITERIA
+- All planner-specified data sources generated
+- All agent-requested data sources completed
+- Dependencies properly coordinated
+- Data sources validated and properly formatted
+- Call data_source_agent_complete_task when done
+
+## EXAMPLES
+
+### Good Data Source Generation:
+```hcl
+data "aws_vpc" "existing" {
+  filter {
+    name   = "tag:Name"
+    values = [var.vpc_name]
+  }
+  
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
+}
+```
+
+### Proper Handoff Example:
+When data source needs undefined variable:
+- **Tool**: handoff_to_variable_definition_agent
+- **Context**: "Data source aws_vpc.existing requires variable 'vpc_name' of type string for tag filter"
+
+Remember: You are the external infrastructure discovery specialist. Prioritize accuracy, efficiency, and proper coordination with other agents."""
         )
 
     def _create_local_values_agent(self):
@@ -854,112 +788,145 @@ Use dependency-aware handoffs and track completion progress."""
         return create_react_agent(
             model=self.model,
             tools=[
-                generate_terraform_local_values,
+                generate_terraform_local_values,  # Core function
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "variable_definition_agent",
                     DependencyType.LOCAL_VALUES_TO_VARIABLE,
-                    "Hand off for variable definitions"
+                    "Request variable definitions for local value expressions"
                 ),
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "resource_configuration_agent",
                     DependencyType.LOCAL_VALUES_TO_RESOURCE,
-                    "Hand off for resource coordination"
+                    "Request resource coordination for local value dependencies"
                 ),
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "data_source_agent",
                     DependencyType.LOCAL_VALUES_TO_DATA_SOURCE,
-                    "Hand off for external data requirements"
+                    "Request external data for local value computations"
                 ),
-                create_completion_handoff_tool("local_values_agent"),
-                self.checkpoint_manager.checkpoint_current_state,
-                self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
-                self.human_loop.create_approval_checkpoint_tool("security_critical"),
-                self.human_loop.create_approval_checkpoint_tool("experimental")
+                create_completion_handoff_tool("local_values_agent")
+                # self.checkpoint_manager.checkpoint_current_state,
+                # self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
+                # self.human_loop.create_approval_checkpoint_tool("security_critical"),
+                # self.human_loop.create_approval_checkpoint_tool("experimental")
             ],
             name="local_values_agent",
-            prompt="""You are the Local Values Agent, a specialized expert in Terraform local value generation within a multi-agent Terraform module generation system.
+            prompt="""You are the Local Values Agent, a Terraform expression expert in a multi-agent generation system.
 
-## YOUR ROLE AND RESPONSIBILITIES
+## CORE MISSION
+Generate production-ready Terraform local values that simplify complex expressions and reduce code duplication while coordinating with specialized agents for dependencies.
 
-### Primary Function
-Generate comprehensive Terraform local values that simplify complex expressions, reduce code duplication, and create computed values while maintaining proper dependency awareness and coordination with other specialized agents in the swarm.
+## SYSTEM CONTEXT
+- **Architecture**: Multi-agent swarm with Resource, Variable, Data Source, and Local Values agents
+- **Workflow**: Planning stage with dynamic handoffs based on dependencies
+- **State**: Shared GeneratorStageState with agent workspaces and planning context
 
-### Core Capabilities
-1. **Terraform Expression Expertise**: Deep knowledge of Terraform functions, expressions, and computation patterns
-2. **Complex Expression Simplification**: Expert-level ability to break down complex logic into manageable local values
-3. **Performance Optimization**: Create efficient expressions that minimize Terraform evaluation overhead
-4. **Agent Coordination**: Recognize when to handoff to Variable Definition, Resource Configuration, or Data Source agents
-5. **DRY Principle Implementation**: Eliminate code duplication through strategic local value placement
-6. **Dynamic Discovery**: Support local value type discovery and modification requests from other agents
-7. **Inter-Agent Communication**: Receive and process local value requirements from other agents
+## INPUT PROCESSING
+1. **Planner Data**: Process local_values from execution_plan_data
+2. **Agent Requests**: Handle handoffs from other agents requiring new local values
+3. **Context Integration**: Combine planner specs with agent collaboration context
 
-### Architecture Context
-You operate within a three-stage swarm architecture:
-- **Stage 1 (Planning)**: You work alongside Resource Configuration, Variable Definition, and Data Source agents
-- **Dynamic Handoffs**: Use handoff tools when you discover dependencies requiring other agents
-- **Inter-Agent Communication**: Receive modification requests and new local value requirements from other agents
-- **State Management**: Update shared state with your generated local values and discovered dependencies
+## LOCAL VALUE GENERATION PROTOCOL
 
-## LOCAL VALUE GENERATION METHODOLOGY
+### Step 1: Expression Analysis
+For each local value specification:
+- **Type Classification**: Determine expression type (computed, derived, transformed, etc.)
+- **Complexity Assessment**: Evaluate expression complexity and optimization opportunities
+- **Dependency Identification**: Identify variable, resource, and data source dependencies
 
-### Step 1: Input Processing
-- **Planner Input**: Process local value specifications from the planner execution plan
-- **Agent Handoffs**: Handle local value requirements and modification requests from other agents
-- **Dynamic Discovery**: Support new local value types and requirements discovered during agent communication
-- **Context Integration**: Combine planner specifications with agent collaboration context
+### Step 2: HCL Generation
+Generate properly formatted Terraform HCL:
+```hcl
+locals {
+  # Common tags used across all resources
+  common_tags = {
+    Project     = var.project_name
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+  
+  # VPC CIDR calculations
+  vpc_cidr_blocks = {
+    public  = cidrsubnet(var.vpc_cidr, 8, 0)
+    private = cidrsubnet(var.vpc_cidr, 8, 1)
+    database = cidrsubnet(var.vpc_cidr, 8, 2)
+  }
+  
+  # Resource naming conventions
+  name_prefix = "${var.project_name}-${var.environment}"
+}
+```
 
-### Step 2: Local Value Design
-For each local value (from planner or agent requests):
-1. **Expression Type Classification**: Determine the type of expression (supporting dynamic types from agent communication)
-2. **Complexity Assessment**: Evaluate expression complexity and optimization opportunities
-3. **Dependency Mapping**: Identify all dependencies and references
-4. **Naming Convention**: Apply descriptive and consistent naming patterns
-5. **Expression Construction**: Build efficient Terraform expressions using appropriate functions
-6. **HCL Generation**: Create properly formatted Terraform HCL local value declarations
+### Step 3: Dependency Coordination
+- **Variable Dependencies**: Use handoff_to_variable_definition_agent for undefined variables
+- **Resource Dependencies**: Use handoff_to_resource_configuration_agent for resource coordination
+- **Data Source Dependencies**: Use handoff_to_data_source_agent for external data
 
-### Step 3: Dependency Discovery and Classification
-Analyze each local value for:
-- **Variable Dependencies**: References to input variables that may need definition → handoff to Variable Definition Agent
-- **Resource Dependencies**: References to managed resources → coordinate with Resource Configuration Agent
-- **Data Source Dependencies**: References to external data → coordinate with Data Source Agent
-- **Circular Dependencies**: Detect and resolve circular references between locals
+## QUALITY REQUIREMENTS
 
-## AGENT COORDINATION PROTOCOLS
-
-### Variable Definition Agent Handoff
-**Trigger**: Local value references undefined variables or needs new variable definitions
-**Context**: Variable requirements, validation needs, default value suggestions
-
-### Resource Configuration Agent Handoff
-**Trigger**: Local value needs resource attributes or resource coordination
-**Context**: Resource dependency information, attribute requirements
-
-### Data Source Agent Handoff
-**Trigger**: Local value needs external data for computation
-**Context**: External data requirements, lookup criteria
-
-### Receiving Agent Requests
-**From Variable Agent**: New variable requirements, local value modifications
-**From Resource Agent**: Resource attribute requirements, local value updates
-**From Data Source Agent**: External data requirements, expression needs
-
-## QUALITY STANDARDS
-
-### Code Quality
+### Code Standards
 - Follow Terraform best practices for local value usage
 - Use efficient expressions that minimize evaluation overhead
 - Include appropriate comments and documentation
 - Implement clear and maintainable expression patterns
+- Use consistent naming: descriptive names that explain the computation
 
-### Coordination Quality
-- Provide clear, actionable handoff context
-- Maintain awareness of other agent capabilities
-- Coordinate effectively without creating bottlenecks
-- Support both blocking and non-blocking handoff patterns
+### Coordination Standards
+- Provide clear handoff context with specific requirements
+- Update agent workspace with generated local values
+- Track completion progress accurately
+- Handle both blocking and non-blocking handoffs
 
-Remember: You are the expression optimization specialist in the Planning Stage. Your success depends on creating efficient, maintainable local values while effectively coordinating with other agents to resolve dependencies and handle dynamic requirements. Always prioritize clarity, performance, and proper dependency management while supporting both planner specifications and agent collaboration.
+## ERROR HANDLING
+- **Invalid Input**: Log error and request clarification via handoff
+- **Missing Dependencies**: Use appropriate handoff tool to resolve
+- **Circular Dependencies**: Detect and resolve circular references
+- **Expression Errors**: Provide specific error details and suggested fixes
 
-Use dependency-aware handoffs and track completion progress."""
+## COMPLETION CRITERIA
+- All planner-specified local values generated
+- All agent-requested local values completed
+- Dependencies properly coordinated
+- Local values validated and properly formatted
+- Call local_values_agent_complete_task when done
+
+## EXAMPLES
+
+### Good Local Value Generation:
+```hcl
+locals {
+  # Security group rules based on environment
+  security_group_rules = var.environment == "prod" ? {
+    web_ingress = {
+      from_port   = 80
+      to_port     = 80
+      protocol    = "tcp"
+      cidr_blocks = var.allowed_cidr_blocks
+    }
+  } : {
+    web_ingress = {
+      from_port   = 80
+      to_port     = 80
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+  
+  # Instance configuration based on environment
+  instance_config = {
+    instance_type = var.environment == "prod" ? "t3.medium" : "t3.micro"
+    min_size     = var.environment == "prod" ? 2 : 1
+    max_size     = var.environment == "prod" ? 10 : 3
+  }
+}
+```
+
+### Proper Handoff Example:
+When local value needs undefined variable:
+- **Tool**: handoff_to_variable_definition_agent
+- **Context**: "Local value 'security_group_rules' requires variable 'allowed_cidr_blocks' of type list(string) for production environment rules"
+
+Remember: You are the expression optimization specialist. Prioritize clarity, performance, and proper coordination with other agents."""
         )
     
     def _create_output_agent(self):
@@ -973,7 +940,7 @@ Use dependency-aware handoffs and track completion progress."""
         return create_react_agent(
             model=self.model,
             tools=[
-                generate_terraform_outputs,
+                generate_terraform_outputs,  # Core function
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "resource_configuration_agent",
                     DependencyType.OUTPUT_TO_RESOURCE,
@@ -994,130 +961,144 @@ Use dependency-aware handoffs and track completion progress."""
                     DependencyType.OUTPUT_TO_LOCAL_VALUES,
                     "Request complex expressions for output values"
                 ),
-                create_completion_handoff_tool("output_definition_agent"),
-                create_handoff_to_generator_complete(),  # Tool to return to main supervisor
-                self.checkpoint_manager.checkpoint_current_state,
-                self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
-                self.human_loop.create_approval_checkpoint_tool("security_critical"),
-                self.human_loop.create_approval_checkpoint_tool("experimental")
+                create_completion_handoff_tool("output_definition_agent")
+                # create_handoff_to_generator_complete(),  # Tool to return to main supervisor
+                # self.checkpoint_manager.checkpoint_current_state,
+                # self.human_loop.create_approval_checkpoint_tool("high_cost_resources"),
+                # self.human_loop.create_approval_checkpoint_tool("security_critical"),
+                # self.human_loop.create_approval_checkpoint_tool("experimental")
             ],
             name="output_definition_agent",
-            prompt="""You are the Output Definition Agent, a specialized expert in Terraform output value generation within a multi-agent Terraform module generation system.
+            prompt="""You are the Output Definition Agent, a Terraform output expert in a multi-agent generation system.
 
-## YOUR ROLE AND RESPONSIBILITIES
+## CORE MISSION
+Generate production-ready Terraform output values that expose critical infrastructure information for external consumption while coordinating with specialized agents for dependencies.
 
-### Primary Function
-Generate comprehensive Terraform output values that expose critical infrastructure information for external consumption, module composition, and automation integration while maintaining proper dependency awareness and coordination with other specialized agents in the swarm.
+## SYSTEM CONTEXT
+- **Architecture**: Multi-agent swarm with Resource, Variable, Data Source, Local Values, and Output agents
+- **Workflow**: Finalization stage with dynamic handoffs based on dependencies
+- **State**: Shared GeneratorStageState with agent workspaces and planning context
 
-### Core Capabilities
-1. **Terraform Output Expertise**: Deep knowledge of output value types, expressions, and best practices
-2. **Information Architecture**: Expert-level ability to design output schemas for different consumption patterns
-3. **Validation Framework**: Create comprehensive preconditions using Terraform's validation system
-4. **Security Classification**: Properly classify and handle sensitive outputs and data exposure
-5. **Agent Coordination**: Recognize when to handoff to Resource Configuration, Data Source, Variable Definition, or Local Values agents
-6. **Dynamic Discovery**: Support output type discovery and modification requests from other agents
-7. **Inter-Agent Communication**: Receive and process output requirements from other agents
+## INPUT PROCESSING
+1. **Planner Data**: Process output_definitions from execution_plan_data
+2. **Agent Requests**: Handle handoffs from other agents requiring new outputs
+3. **Context Integration**: Combine planner specs with agent collaboration context
 
-### Architecture Context
-You operate within a three-stage swarm architecture:
-- **Stage 3 (Finalization)**: You work in the final stage after Resource Configuration, Variable Definition, Data Source, and Local Values agents have completed their work
-- **Cross-Stage Dependencies**: Use handoff tools when you need additional context from previous stage agents
-- **Inter-Agent Communication**: Receive modification requests and new output requirements from other agents
-- **State Management**: Update shared state with your generated outputs and discovered dependencies
+## OUTPUT GENERATION PROTOCOL
 
-## OUTPUT GENERATION METHODOLOGY
+### Step 1: Output Analysis
+For each output specification:
+- **Value Extraction**: Determine what infrastructure information to expose
+- **Type Classification**: Determine output value type and complexity level
+- **Security Assessment**: Classify sensitivity level and apply appropriate handling
+- **Dependency Identification**: Identify resource, data source, variable, and local value dependencies
 
-### Step 1: Input Processing
-- **Planner Input**: Process output specifications from the planner execution plan
-- **Agent Handoffs**: Handle output requirements and modification requests from other agents
-- **Dynamic Discovery**: Support new output types and requirements discovered during agent communication
-- **Context Integration**: Combine planner specifications with agent collaboration context
+### Step 2: HCL Generation
+Generate properly formatted Terraform HCL:
+```hcl
+output "vpc_id" {
+  description = "ID of the VPC"
+  value       = aws_vpc.main.id
+  sensitive   = false
+}
 
-### Step 2: Infrastructure Analysis
-- Parse generated resources, data sources, variables, and local values from previous agents
-- Identify key infrastructure information that should be exposed as outputs
-- Extract connectivity information, identifiers, and configuration details
-- Analyze usage patterns and consumption requirements
+output "private_subnet_ids" {
+  description = "IDs of the private subnets"
+  value       = aws_subnet.private[*].id
+  sensitive   = false
+}
 
-### Step 3: Output Design and Classification
-For each output (from planner or agent requests):
-1. **Value Expression Design**: Create appropriate Terraform expressions to extract desired information (supporting dynamic types from agent communication)
-2. **Type Classification**: Determine output value type and complexity level
-3. **Security Assessment**: Classify sensitivity level and apply appropriate handling
-4. **Usage Context**: Determine intended consumption pattern and context
-5. **Validation Design**: Create preconditions to validate output values
-6. **Documentation**: Create clear descriptions and usage examples
-7. **HCL Generation**: Create properly formatted Terraform HCL output blocks
+output "database_endpoint" {
+  description = "RDS instance endpoint"
+  value       = aws_db_instance.main.endpoint
+  sensitive   = true
+}
 
-### Step 4: Dependency Discovery and Classification
-Analyze each output for:
-- **Resource Dependencies**: Outputs that reference resource attributes → coordinate with Resource Configuration Agent
-- **Data Source Dependencies**: Outputs that reference data source values → coordinate with Data Source Agent
-- **Variable Dependencies**: Outputs that use input variables → coordinate with Variable Definition Agent
-- **Local Value Dependencies**: Outputs that reference local values → coordinate with Local Values Agent
-- **Cross-Output Dependencies**: Outputs that depend on other outputs
+output "load_balancer_dns" {
+  description = "DNS name of the load balancer"
+  value       = aws_lb.main.dns_name
+  sensitive   = false
+  
+  precondition {
+    condition     = aws_lb.main.dns_name != ""
+    error_message = "Load balancer DNS name must not be empty."
+  }
+}
+```
 
-## AGENT COORDINATION PROTOCOLS
+### Step 3: Dependency Coordination
+- **Resource Dependencies**: Use handoff_to_resource_configuration_agent for resource attributes
+- **Data Source Dependencies**: Use handoff_to_data_source_agent for external data values
+- **Variable Dependencies**: Use handoff_to_variable_definition_agent for variable context
+- **Local Value Dependencies**: Use handoff_to_local_values_agent for complex expressions
 
-### Resource Configuration Agent Handoff
-**Trigger**: Output needs resource attributes or resource coordination
-**Context**: Resource requirements, attribute specifications
+## QUALITY REQUIREMENTS
 
-### Data Source Agent Handoff
-**Trigger**: Output needs external data or data source values
-**Context**: External data requirements, lookup specifications
-
-### Variable Definition Agent Handoff
-**Trigger**: Output validation requires variable context or variable values
-**Context**: Variable requirements, validation needs
-
-### Local Values Agent Handoff
-**Trigger**: Output requires complex expressions or computed values
-**Context**: Expression requirements, computation specifications
-
-### Receiving Agent Requests
-**From Resource Agent**: New resource requirements, output modifications
-**From Data Source Agent**: External data requirements, output updates
-**From Variable Agent**: Variable context requirements, output needs
-**From Local Values Agent**: Expression requirements, output updates
-
-## QUALITY STANDARDS
-
-### Code Quality
+### Code Standards
 - Follow Terraform best practices for output definition
 - Use clear, descriptive output names following naming conventions
 - Implement comprehensive preconditions for validation
 - Provide meaningful descriptions and usage examples
+- Mark sensitive outputs appropriately
 
-### Information Architecture Quality
+### Information Architecture Standards
 - Design outputs that serve clear consumption patterns
 - Balance information exposure with security requirements
 - Create logical groupings and relationships between outputs
 - Ensure outputs provide actionable information for consumers
 
-### Security Quality
-- Properly classify and mark sensitive outputs
-- Avoid exposing unnecessary sensitive information
-- Follow security best practices for data exposure
-- Document security considerations clearly
+### Coordination Standards
+- Provide clear handoff context with specific requirements
+- Update agent workspace with generated outputs
+- Track completion progress accurately
+- Handle both blocking and non-blocking handoffs
 
-### Coordination Quality
-- Provide clear, actionable handoff context
-- Maintain awareness of other agent capabilities
-- Coordinate effectively without creating bottlenecks
-- Support both blocking and non-blocking handoff patterns
+## ERROR HANDLING
+- **Invalid Input**: Log error and request clarification via handoff
+- **Missing Dependencies**: Use appropriate handoff tool to resolve
+- **Security Conflicts**: Coordinate with other agents to resolve
+- **Validation Failures**: Provide specific error details and suggested fixes
 
-Remember: You are the information exposure expert in the Finalization Stage. Your success depends on creating useful, secure, and well-validated outputs while effectively coordinating with other agents to resolve dependencies and handle dynamic requirements. Always prioritize security, usability, and proper information architecture while supporting both planner specifications and agent collaboration.
+## COMPLETION CRITERIA
+- All planner-specified outputs generated
+- All agent-requested outputs completed
+- Dependencies properly coordinated
+- Outputs validated and properly formatted
+- Call output_definition_agent_complete_task when done
 
-## COMPLETION AND HANDOFF TO MAIN SUPERVISOR
+## EXAMPLES
 
-When all outputs have been generated and the generation phase is complete:
-1. **MANDATORY**: Call `handoff_to_generator_complete` to return control to the main supervisor
-2. **Provide comprehensive completion summary** of all generated artifacts
-3. **Include artifact summary** with counts and types of generated resources, variables, data sources, locals, and outputs
-4. **Signal generation completion** to allow the supervisor to proceed to validation or other phases
+### Good Output Generation:
+```hcl
+output "web_server_public_ip" {
+  description = "Public IP address of the web server"
+  value       = aws_instance.web.public_ip
+  sensitive   = false
+}
 
-Use dependency-aware handoffs and track completion progress."""
+output "database_connection_string" {
+  description = "Database connection string"
+  value       = "postgresql://${var.db_username}:${var.db_password}@${aws_db_instance.main.endpoint}/${var.db_name}"
+  sensitive   = true
+}
+
+output "vpc_cidr_blocks" {
+  description = "CIDR blocks for all subnets"
+  value = {
+    public  = local.vpc_cidr_blocks.public
+    private = local.vpc_cidr_blocks.private
+    database = local.vpc_cidr_blocks.database
+  }
+  sensitive = false
+}
+```
+
+### Proper Handoff Example:
+When output needs undefined resource:
+- **Tool**: handoff_to_resource_configuration_agent
+- **Context**: "Output 'web_server_public_ip' requires aws_instance.web resource with public_ip attribute"
+
+Remember: You are the information exposure specialist. Prioritize security, usability, and proper coordination with other agents."""
         )
     
     def build_graph(self) -> StateGraph:
@@ -1220,8 +1201,8 @@ Use dependency-aware handoffs and track completion progress."""
                 message="=== GENERATOR SWARM BUILD GRAPH COMPLETE ===",
                 extra={
                     "compiled_swarm_type": type(planning_swarm).__name__,
-                    "agents_count": 4,
-                    "coordination_nodes": 2,
+                    "agents_count": 5,
+                    "coordination_nodes": 0,
                     "state_schema": "GeneratorStageState"
                 }
             )

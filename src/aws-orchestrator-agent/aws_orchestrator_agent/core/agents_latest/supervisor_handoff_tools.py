@@ -194,9 +194,10 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
                 }
             )
             # Fallback: create a simple message without tool_call_id
-            tool_message = HumanMessage(
+            tool_message = ToolMessage(
                 content=f"Successfully transferred to {agent_name}",
                 name=name,
+                tool_call_id=tool_call_id,
             )
         
         # Get messages from state
@@ -262,40 +263,31 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
                 }
             )
         elif agent_name == "generator_swarm":            
-            # Create a proper SupervisorState object for transformation
-            # Don't include the tool_message in the transformation to avoid tool_call_id issues
-            supervisor_state = type('SupervisorState', (), {
-                'user_request': user_request if user_request else task_description,
-                'session_id': session_id,
-                'task_id': task_id,
-                'messages': messages,  # Don't include tool_message here
-                'workspace_ref': state_dict.get("workspace_ref"),
-                'terraform_context': state_dict.get("terraform_context", {}),
-                'planner_data': state_dict.get("planner_data", {}),  # Include planner_data for generator_swarm
-            })()
+            # For generator_swarm, pass the full supervisor state data in the send_payload
+            # The generator_swarm's input_transform method will handle the transformation
+            state_update = {
+                "messages": messages + [tool_message],
+                # Include all the supervisor state data that input_transform needs
+                "user_request": user_request if user_request else task_description,
+                "session_id": session_id,
+                "task_id": task_id,
+                "planner_data": state_dict.get("planner_data", {}),
+                "workspace_ref": state_dict.get("workspace_ref"),
+                "terraform_context": state_dict.get("terraform_context", {}),
+            }
             
-            # Transform to proper GeneratorStageState
-            generator_state = StateTransformer.supervisor_to_generator_swarm(supervisor_state)
-            
-            # Convert to dict for Command update
-            state_update = generator_state.model_dump()
-            
-            # Add the tool message separately to avoid tool_call_id issues
-            state_update["messages"] = messages + [tool_message]
-            
-            # Log the transformation details
+            # Log the nested state approach details
             handoff_logger.log_structured(
                 level="DEBUG",
-                message=f"Using state transformation for {agent_name}",
+                message=f"Using nested state approach for {agent_name}",
                 extra={
                     "agent_name": agent_name,
-                    "transformation_method": "StateTransformer.supervisor_to_generator_swarm",
+                    "transformation_method": "nested_generator_state",
                     "state_update_keys": list(state_update.keys()),
                     "messages_count": len(state_update.get("messages", [])),
                     "has_planner_data": "planner_data" in state_dict,
-                    "has_execution_plan_data": "execution_plan_data" in state_update,
-                    "has_state_management_plan_data": "state_management_plan_data" in state_update,
-                    "has_configuration_optimizer_plan_data": "configuration_optimizer_plan_data" in state_update,
+                    "note": "generator_state will be created by GeneratorSwarmAgent.input_transform()",
+                    "architecture": "nested_state_approach"
                 }
             )
         else:
@@ -334,14 +326,15 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
         # Log the final state update
         handoff_logger.log_structured(
             level="DEBUG",
-            message=f"Handing off to {agent_name} - workflow_state excluded to prevent schema conflicts",
+            message=f"Handing off to {agent_name} - using nested state approach for generator_swarm",
             extra={
                 "agent_name": agent_name,
                 "state_update_keys": list(state_update.keys()),
                 "final_session_id": state_update.get("session_id"),
                 "final_task_id": state_update.get("task_id"),
-                "note": "workflow_state excluded to prevent PlannerSupervisorState validation errors",
+                "note": "nested generator_state approach - generator_state created by input_transform()" if agent_name == "generator_swarm" else "workflow_state excluded to prevent schema conflicts",
                 "has_workflow_state_in_original": "workflow_state" in state_dict,
+                "architecture": "nested_state_approach" if agent_name == "generator_swarm" else "standard_handoff"
             }
         )
         

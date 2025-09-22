@@ -15,6 +15,7 @@ from langgraph.types import Command
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
+from ..generator_state import GeneratorStageState
 from .output_generator_prompts import OUTPUT_DEFINITION_AGENT_USER_PROMPT_TEMPLATE, OUTPUT_DEFINITION_AGENT_SYSTEM_PROMPT
 
 # Create agent logger for output generator
@@ -248,10 +249,8 @@ class TerraformOutputGenerationResponse(BaseModel):
 
 
 @tool("generate_terraform_outputs")
-def generate_terraform_outputs(
-    output_requirements: Annotated[List[Dict[str, Any]], "Output requirements from execution plan or agent requests"],
-    generation_context: Annotated[Dict[str, Any], "Context from execution plan and previous agents"], 
-    state: Annotated[Dict[str, Any], InjectedState]
+async def generate_terraform_outputs(
+    state: Annotated[Any, InjectedState]
 ) -> TerraformOutputGenerationResponse:
     """
     Generate Terraform output values from infrastructure and requirements.
@@ -267,14 +266,18 @@ def generate_terraform_outputs(
     try:
         start_time = datetime.now()
         
+        # Extract data from state
+        output_requirements = state.get('output_requirements', [])
+        generation_context = state.get('generation_context', {})
+        
         output_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform output generation",
             extra={
                 "output_requirements_count": len(output_requirements),
-                "generation_id": state.get('generation_id', 'unknown'),
-                "current_stage": state.get('current_stage', 'unknown'),
-                "active_agent": state.get('active_agent', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown'),
+                "current_stage": generator_state.get('current_stage', 'unknown'),
+                "active_agent": generator_state.get('active_agent', 'unknown')
             }
         )
         
@@ -291,13 +294,13 @@ def generate_terraform_outputs(
         
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
-        workspace = state.get('agent_workspaces', {}).get('output_definition_agent', {})
+        workspace = generator_state.get('agent_workspaces', {}).get('output_definition_agent', {})
         
-        # Extract generated infrastructure from state
-        generated_resources = extract_generated_resources(state)
-        generated_data_sources = extract_generated_data_sources(state)
-        generated_variables = extract_generated_variables(state)
-        generated_locals = extract_generated_locals(state)
+        # Extract generated infrastructure from nested generator_state
+        generated_resources = extract_generated_resources(generator_state)
+        generated_data_sources = extract_generated_data_sources(generator_state)
+        generated_variables = extract_generated_variables(generator_state)
+        generated_locals = extract_generated_locals(generator_state)
         
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
@@ -308,18 +311,18 @@ def generate_terraform_outputs(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
-            generation_id=state.get('generation_id', str(uuid.uuid4())),
+            generation_id=generator_state.get('generation_id', str(uuid.uuid4())),
             output_requirements=escape_json_for_template(json.dumps(output_requirements, indent=2)),
-            current_stage=state.get('current_stage', 'finalization'),
-            active_agent=state.get('active_agent', 'output_definition_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(state.get('resolved_dependencies', {}), indent=2)),
+            current_stage=generator_state.get('current_stage', 'finalization'),
+            active_agent=generator_state.get('active_agent', 'output_definition_agent'),
+            previous_agent_results=escape_json_for_template(json.dumps(generator_state.get('resolved_dependencies', {}), indent=2)),
             generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
             generated_resources=escape_json_for_template(json.dumps(generated_resources, indent=2)),
             generated_data_sources=escape_json_for_template(json.dumps(generated_data_sources, indent=2)),
             generated_variables=escape_json_for_template(json.dumps(generated_variables, indent=2)),
             generated_locals=escape_json_for_template(json.dumps(generated_locals, indent=2)),
             specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(state.get('handoff_context', {}), indent=2)),
+            handoff_context=escape_json_for_template(json.dumps(generator_state.get('handoff_context', {}), indent=2)),
             agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
         )
         
@@ -383,12 +386,12 @@ def generate_terraform_outputs(
             message="Executing LLM chain for output generation",
             extra={
                 "prompt_length": len(formatted_user_prompt),
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
         # Execute the chain
-        llm_response = chain.invoke({})
+        llm_response = await chain.ainvoke({})
         
         output_generator_logger.log_structured(
             level="DEBUG",
@@ -396,14 +399,14 @@ def generate_terraform_outputs(
             extra={
                 "generated_outputs_count": len(llm_response.generated_outputs),
                 "discovered_dependencies_count": len(llm_response.discovered_dependencies),
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
         # Post-process and enhance response
         enhanced_response = post_process_output_response(
             llm_response, 
-            state, 
+            generator_state, 
             generation_context, 
             start_time
         )
@@ -416,24 +419,25 @@ def generate_terraform_outputs(
                 "final_dependencies_count": len(enhanced_response.discovered_dependencies),
                 "generation_duration_seconds": enhanced_response.generation_metadata.generation_duration_seconds,
                 "completion_status": enhanced_response.completion_status,
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
         return enhanced_response
         
     except Exception as e:
+        generator_state = state.get('generator_state', {})
         output_generator_logger.log_structured(
             level="ERROR",
             message="Terraform output generation failed",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
-                "generation_id": state.get('generation_id', 'unknown'),
-                "current_stage": state.get('current_stage', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown'),
+                "current_stage": generator_state.get('current_stage', 'unknown')
             }
         )
-        return create_output_error_response(e, state, datetime.now())
+        return create_output_error_response(e, generator_state, datetime.now())
 
 def extract_generated_resources(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract generated resources from swarm state"""

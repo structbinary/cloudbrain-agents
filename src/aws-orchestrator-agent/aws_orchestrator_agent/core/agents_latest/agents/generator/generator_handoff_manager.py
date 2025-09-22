@@ -28,7 +28,7 @@ class GeneratorStageHandoffManager:
         def dependency_handoff_tool(
             task_description: Annotated[str, "Specific task for target agent"],
             dependency_data: Annotated[Dict[str, Any], "Structured dependency data"],
-            state: Annotated[GeneratorStageState, InjectedState],
+            state: Annotated[Any, InjectedState],
             tool_call_id: Annotated[str, InjectedToolCallId],
             priority_level: Annotated[int, "Priority: 1=low, 5=critical"] = 3,
             blocking: Annotated[bool, "Whether source agent should wait for completion"] = True

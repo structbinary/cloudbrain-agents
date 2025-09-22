@@ -10,6 +10,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt import InjectedState
+from aws_orchestrator_agent.core.agents_latest.agents.generator.generator_state import GeneratorStageState
+from aws_orchestrator_agent.core.agents_latest.types import SupervisorState
 from langgraph.types import Command
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
@@ -186,17 +188,25 @@ class TerraformResourceGenerationResponse(BaseModel):
     @field_validator('completion_status')
     @classmethod
     def validate_completion_status(cls, v):
-        valid_statuses = ['in_progress', 'completed', 'blocked', 'error', 'waiting_for_dependencies']
+        valid_statuses = [
+            'in_progress', 
+            'completed', 
+            'blocked', 
+            'error', 
+            'waiting_for_dependencies',
+            'no_resources_found',
+            'completed_no_resources',
+            'completed_with_dependencies',
+            'partial_completion',
+            'requires_human_review',
+            'escalated'
+        ]
         if v not in valid_statuses:
             raise ValueError(f'Status must be one of: {valid_statuses}')
         return v
 
 @tool("generate_terraform_resources")
-def generate_terraform_resources(
-    resource_specifications: Annotated[List[Dict[str, Any]], "Resource specifications from execution plan or agent requests"],
-    generation_context: Annotated[Dict[str, Any], "Context from execution plan and previous agents"], 
-    state: Annotated[Dict[str, Any], InjectedState]
-) -> TerraformResourceGenerationResponse:
+async def generate_terraform_resources(state: Annotated[Any, InjectedState]) -> TerraformResourceGenerationResponse:
     """
     Generate Terraform AWS resource blocks from execution plan specifications and agent requests.
     
@@ -211,14 +221,27 @@ def generate_terraform_resources(
     try:
         start_time = datetime.now()
         
+        # Fetch all data from state
+        agent_workspace = state.get('agent_workspaces', {}).get('resource_configuration_agent', {})
+        planning_context = state.get('planning_context', {})
+        
+        # Get resource specifications from planner input or current task
+        resource_specifications = (
+            agent_workspace.get('current_task', {}).get('resource_specifications', []) or
+            agent_workspace.get('planner_input', [])
+        )
+        
+        # Get generation context from planning context
+        generation_context = planning_context
+        
         resource_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform resource generation",
             extra={
                 "resource_specifications_count": len(resource_specifications),
-                "generation_id": state.get('generation_id', 'unknown'),
-                "current_stage": state.get('current_stage', 'unknown'),
-                "active_agent": state.get('active_agent', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown'),
+                "current_stage": generator_state.get('current_stage', 'unknown'),
+                "active_agent": generator_state.get('active_agent', 'unknown')
             }
         )
         
@@ -235,7 +258,7 @@ def generate_terraform_resources(
         
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
-        workspace = state.get('agent_workspaces', {}).get('resource_configuration_agent', {})
+        workspace = agent_workspace
         
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
@@ -246,14 +269,14 @@ def generate_terraform_resources(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
-            generation_id=state.get('generation_id', str(uuid.uuid4())),
+            generation_id=generator_state.get('generation_id', str(uuid.uuid4())),
             resource_specifications=escape_json_for_template(json.dumps(resource_specifications, indent=2)),
-            current_stage=state.get('current_stage', 'planning'),
-            active_agent=state.get('active_agent', 'resource_configuration_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(state.get('resolved_dependencies', {}), indent=2)),
+            current_stage=generator_state.get('current_stage', 'planning'),
+            active_agent=generator_state.get('active_agent', 'resource_configuration_agent'),
+            previous_agent_results=escape_json_for_template(json.dumps(generator_state.get('resolved_dependencies', {}), indent=2)),
             generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
             specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(state.get('handoff_context', {}), indent=2)),
+            handoff_context=escape_json_for_template(json.dumps(generator_state.get('handoff_context', {}), indent=2)),
             agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
         )
         
@@ -317,12 +340,12 @@ def generate_terraform_resources(
             message="Executing LLM chain for resource generation",
             extra={
                 "prompt_length": len(formatted_user_prompt),
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
         # Execute the chain
-        llm_response = chain.invoke({})
+        llm_response = await chain.ainvoke({})
         
         resource_generator_logger.log_structured(
             level="DEBUG",
@@ -330,7 +353,7 @@ def generate_terraform_resources(
             extra={
                 "generated_resources_count": len(llm_response.generated_resources),
                 "discovered_dependencies_count": len(llm_response.discovered_dependencies),
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
@@ -350,24 +373,25 @@ def generate_terraform_resources(
                 "final_dependencies_count": len(enhanced_response.discovered_dependencies),
                 "generation_duration_seconds": enhanced_response.generation_metadata.generation_duration_seconds,
                 "completion_status": enhanced_response.completion_status,
-                "generation_id": state.get('generation_id', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown')
             }
         )
         
         return enhanced_response
         
     except Exception as e:
+        generator_state = state.get('generator_state', {})
         resource_generator_logger.log_structured(
             level="ERROR",
             message="Terraform resource generation failed",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
-                "generation_id": state.get('generation_id', 'unknown'),
-                "current_stage": state.get('current_stage', 'unknown')
+                "generation_id": generator_state.get('generation_id', 'unknown'),
+                "current_stage": generator_state.get('current_stage', 'unknown')
             }
         )
-        return create_error_response(e, state, datetime.now())
+        return create_error_response(e, generator_state, datetime.now())
 
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
     """Extract specific requirements from context"""

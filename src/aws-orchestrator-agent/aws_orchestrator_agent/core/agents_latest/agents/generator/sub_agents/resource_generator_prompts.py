@@ -111,6 +111,19 @@ Use the TerraformResourceGenerationResponse schema with:
 - Clear completion status and next actions
 - Comprehensive metadata and metrics
 
+### Completion Status Values
+Use these specific completion_status values:
+- "completed": All resources generated successfully with no blocking dependencies
+- "completed_with_dependencies": Resources generated but dependencies require handoffs
+- "completed_no_resources": No resources to generate (empty specification)
+- "in_progress": Generation started but not yet complete
+- "blocked": Cannot proceed due to missing information or dependencies
+- "error": Generation failed due to errors
+- "waiting_for_dependencies": Waiting for other agents to resolve dependencies
+- "partial_completion": Some resources generated, others blocked
+- "requires_human_review": Generated resources need human approval
+- "escalated": Issue escalated for human intervention
+
 ## QUALITY STANDARDS
 
 ### Code Quality

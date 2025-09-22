@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from datetime import datetime
 from enum import Enum
 from typing import TypedDict, Annotated
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
 class GeneratorAgentStatus(Enum):
@@ -19,6 +19,8 @@ class DependencyType(Enum):
     RESOURCE_TO_LOCAL_VALUES = "resource_to_local_values"
     VARIABLE_TO_LOCAL = "variable_to_local"
     VARIABLE_TO_RESOURCE = "variable_to_resource"
+    VARIABLE_TO_DATA_SOURCE = "variable_to_data_source"
+    VARIABLE_TO_LOCAL_VALUES = "variable_to_local_values"
     DATA_SOURCE_TO_LOCAL = "data_source_to_local"
     DATA_SOURCE_TO_VARIABLE = "data_source_to_variable"
     DATA_SOURCE_TO_LOCAL_VALUES = "data_source_to_local_values"
@@ -35,10 +37,11 @@ class DependencyType(Enum):
 
 class GeneratorStageState(TypedDict):
     """Extended state specific to Planning Stage coordination"""
-    
-    # Core SwarmState fields (required by create_swarm)
-    messages: Annotated[List[BaseMessage], add_messages]
     active_agent: str
+    
+    # Message handling for LangGraph (fixed TypedDict format)
+    llm_input_messages: Annotated[List[AnyMessage], add_messages]
+    messages: Annotated[List[AnyMessage], add_messages]
     
     # Planning Stage Management
     stage_status: str = "planning_active"  # planning_active, planning_complete, planning_error
@@ -64,32 +67,58 @@ class GeneratorStageState(TypedDict):
             "generated_resources": [],
             "pending_variable_requests": [],
             "pending_data_source_requests": [],
-            "completion_checklist": []
+            "completion_checklist": [],
+            # Planner input data from execution plan
+            "planner_input": [],  # resource_configurations from execution_plan_data
+            "module_structure": {},  # module_structure_plan from execution_data
+            "optimization_data": {},  # configuration_optimizer_data from execution_data
+            # Additional context fields from StateTransformer
+            "terraform_files": [],  # terraform_files from execution plan
+            "dependencies": [],  # resource_dependencies from execution plan
+            "security_context": [],  # security_considerations from execution plan
+            "cost_context": {}  # estimated_costs from execution plan
         },
         "variable_definition_agent": {
             "generated_variables": [],
             "variable_validation_rules": [],
             "source_requests": [],  # requests from other agents
-            "completion_checklist": []
+            "completion_checklist": [],
+            # Planner input data from execution plan
+            "planner_input": [],  # variable_definitions from execution_plan_data
+            "validation_context": {},  # validation rules and default values
+            # Additional context fields from StateTransformer
+            "resource_dependencies": []  # resource_dependencies from execution plan
         },
         "data_source_agent": {
             "generated_data_sources": [],
             "external_dependencies": [],
-            "completion_checklist": []
+            "completion_checklist": [],
+            # Planner input data from execution plan
+            "planner_input": [],  # data_sources from execution_plan_data
+            # Additional context fields from StateTransformer
+            "resource_dependencies": []  # resource_dependencies from execution plan
         },
         "local_values_agent": {
             "generated_locals": [],
             "computed_expressions": [],
-            "completion_checklist": []
+            "completion_checklist": [],
+            # Planner input data from execution plan
+            "planner_input": [],  # local_values from execution_plan_data
+            # Additional context fields from StateTransformer
+            "computed_dependencies": []  # resource_dependencies from execution plan
         },
         "output_definition_agent": {
             "generated_outputs": [],
             "output_validation_rules": [],
             "source_requests": [],
-            "completion_checklist": []
+            "completion_checklist": [],
+            # Planner input data from execution plan
+            "planner_input": [],  # output_definitions from execution_plan_data
+            "output_context": {},  # dependencies and preconditions
+            # Additional context fields from StateTransformer
+            "resource_dependencies": []  # resource_dependencies from execution plan
         }
     }
-
     execution_plan_data: Optional[Dict[str, Any]] = None
     state_management_plan_data: Optional[Dict[str, Any]] = None
     configuration_optimizer_plan_data: Optional[Dict[str, Any]] = None
@@ -107,3 +136,8 @@ class GeneratorStageState(TypedDict):
     approval_required: bool = False
     approval_context: Dict[str, Any] = {}
     pending_human_decisions: List[Dict[str, Any]] = []
+    
+    # Additional context fields for enhanced functionality
+    planning_context: Optional[Dict[str, Any]] = None  # Additional planning context from input_transform
+    stage_progress: Optional[Dict[str, float]] = None  # Stage-level progress tracking
+    current_stage: Optional[str] = None  # Current stage identifier
