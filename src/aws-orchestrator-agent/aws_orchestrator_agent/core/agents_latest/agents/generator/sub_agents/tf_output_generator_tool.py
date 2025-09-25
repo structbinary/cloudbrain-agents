@@ -15,7 +15,7 @@ from langgraph.types import Command
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
-from ..generator_state import GeneratorStageState
+from ..generator_state import GeneratorSwarmState
 from .output_generator_prompts import OUTPUT_DEFINITION_AGENT_USER_PROMPT_TEMPLATE, OUTPUT_DEFINITION_AGENT_SYSTEM_PROMPT
 
 # Create agent logger for output generator
@@ -249,35 +249,45 @@ class TerraformOutputGenerationResponse(BaseModel):
 
 
 @tool("generate_terraform_outputs")
-async def generate_terraform_outputs(
-    state: Annotated[Any, InjectedState]
+def generate_terraform_outputs(
+    execution_plan_data: dict = None,
+    agent_workspace: dict = None,
+    planning_context: dict = None
 ) -> TerraformOutputGenerationResponse:
     """
     Generate Terraform output values from infrastructure and requirements.
-    
+
+    Args:
+        execution_plan_data: Execution plan data containing output requirements
+        agent_workspace: Agent workspace data for the output definition agent
+        planning_context: Planning context with generation requirements
+               
     This tool analyzes generated infrastructure, designs appropriate outputs,
     identifies dependencies, and provides handoff recommendations to other agents.
     Supports both planner specifications and dynamic agent communication.
     
-    Includes Human-in-the-Loop approval checks for sensitive outputs and
-    complex output expressions that may expose sensitive information.
     """
     
     try:
         start_time = datetime.now()
         
-        # Extract data from state
-        output_requirements = state.get('output_requirements', [])
-        generation_context = state.get('generation_context', {})
+        # Use provided parameters or defaults
+        execution_plan_data = execution_plan_data or {}
+        agent_workspace = agent_workspace or {}
+        planning_context = planning_context or {}
+        
+        # Extract data from parameters
+        output_requirements = execution_plan_data.get('output_requirements', [])
+        generation_context = planning_context or {}
         
         output_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform output generation",
             extra={
                 "output_requirements_count": len(output_requirements),
-                "generation_id": generator_state.get('generation_id', 'unknown'),
-                "current_stage": generator_state.get('current_stage', 'unknown'),
-                "active_agent": generator_state.get('active_agent', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown'),
+                "current_stage": planning_context.get('current_stage', 'unknown'),
+                "active_agent": agent_workspace.get('active_agent', 'unknown')
             }
         )
         
@@ -285,7 +295,7 @@ async def generate_terraform_outputs(
         approval_results = []
         for output_req in output_requirements:
             approval_context = _prepare_output_approval_context(output_req, generation_context)
-            approval_result = _check_output_approval(approval_context, state)
+            approval_result = _check_output_approval(approval_context, agent_workspace)
             approval_results.append(approval_result)
             
             # If approval is rejected, skip this output
@@ -294,13 +304,13 @@ async def generate_terraform_outputs(
         
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
-        workspace = generator_state.get('agent_workspaces', {}).get('output_definition_agent', {})
+        workspace = agent_workspace
         
-        # Extract generated infrastructure from nested generator_state
-        generated_resources = extract_generated_resources(generator_state)
-        generated_data_sources = extract_generated_data_sources(generator_state)
-        generated_variables = extract_generated_variables(generator_state)
-        generated_locals = extract_generated_locals(generator_state)
+        # Extract generated infrastructure from nested state
+        generated_resources = extract_generated_resources(agent_workspace)
+        generated_data_sources = extract_generated_data_sources(agent_workspace)
+        generated_variables = extract_generated_variables(agent_workspace)
+        generated_locals = extract_generated_locals(agent_workspace)
         
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
@@ -311,18 +321,18 @@ async def generate_terraform_outputs(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
-            generation_id=generator_state.get('generation_id', str(uuid.uuid4())),
+            generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
             output_requirements=escape_json_for_template(json.dumps(output_requirements, indent=2)),
-            current_stage=generator_state.get('current_stage', 'finalization'),
-            active_agent=generator_state.get('active_agent', 'output_definition_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(generator_state.get('resolved_dependencies', {}), indent=2)),
+            current_stage=planning_context.get('current_stage', 'finalization'),
+            active_agent=agent_workspace.get('active_agent', 'output_definition_agent'),
+            previous_agent_results=escape_json_for_template(json.dumps(agent_workspace.get('resolved_dependencies', {}), indent=2)),
             generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
             generated_resources=escape_json_for_template(json.dumps(generated_resources, indent=2)),
             generated_data_sources=escape_json_for_template(json.dumps(generated_data_sources, indent=2)),
             generated_variables=escape_json_for_template(json.dumps(generated_variables, indent=2)),
             generated_locals=escape_json_for_template(json.dumps(generated_locals, indent=2)),
             specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(generator_state.get('handoff_context', {}), indent=2)),
+            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2)),
             agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
         )
         
@@ -386,12 +396,12 @@ async def generate_terraform_outputs(
             message="Executing LLM chain for output generation",
             extra={
                 "prompt_length": len(formatted_user_prompt),
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         # Execute the chain
-        llm_response = await chain.ainvoke({})
+        llm_response = chain.invoke({})
         
         output_generator_logger.log_structured(
             level="DEBUG",
@@ -399,7 +409,7 @@ async def generate_terraform_outputs(
             extra={
                 "generated_outputs_count": len(llm_response.generated_outputs),
                 "discovered_dependencies_count": len(llm_response.discovered_dependencies),
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
@@ -419,41 +429,41 @@ async def generate_terraform_outputs(
                 "final_dependencies_count": len(enhanced_response.discovered_dependencies),
                 "generation_duration_seconds": enhanced_response.generation_metadata.generation_duration_seconds,
                 "completion_status": enhanced_response.completion_status,
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         return enhanced_response
         
     except Exception as e:
-        generator_state = state.get('generator_state', {})
+        generator_state = agent_workspace.get('generator_state', {})
         output_generator_logger.log_structured(
             level="ERROR",
             message="Terraform output generation failed",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
-                "generation_id": generator_state.get('generation_id', 'unknown'),
-                "current_stage": generator_state.get('current_stage', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown'),
+                "current_stage": planning_context.get('current_stage', 'unknown')
             }
         )
-        return create_output_error_response(e, generator_state, datetime.now())
+        return create_output_error_response(e, agent_workspace, datetime.now())
 
-def extract_generated_resources(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract generated resources from swarm state"""
-    return state.get('terraform_resources', [])
+def extract_generated_resources(agent_workspace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract generated resources from the agent workspace."""
+    return agent_workspace.get('terraform_resources', [])
 
-def extract_generated_data_sources(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract generated data sources from swarm state"""
-    return state.get('terraform_data_sources', [])
+def extract_generated_data_sources(agent_workspace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract generated data sources from the agent workspace."""
+    return agent_workspace.get('terraform_data_sources', [])
 
-def extract_generated_variables(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract generated variables from swarm state"""
-    return state.get('terraform_variables', [])
+def extract_generated_variables(agent_workspace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract generated variables from the agent workspace."""
+    return agent_workspace.get('terraform_variables', [])
 
-def extract_generated_locals(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract generated local values from swarm state"""
-    return state.get('terraform_locals', [])
+def extract_generated_locals(agent_workspace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract generated local values from the agent workspace."""
+    return agent_workspace.get('terraform_locals', [])
 
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
     """Extract specific requirements from context"""

@@ -2,7 +2,7 @@ from typing import Annotated
 from langgraph.types import Command
 from langgraph.prebuilt import InjectedState
 from langchain_core.tools import tool
-from .generator_state import GeneratorStageState, GeneratorAgentStatus
+from .generator_state import GeneratorSwarmState, GeneratorAgentStatus
 from aws_orchestrator_agent.utils.logger import AgentLogger    
 
 
@@ -15,7 +15,7 @@ class GeneratorStageController:
         self.parallel_execution_slots = 4  # All 4 agents can run in parallel
         self.logger = AgentLogger("GeneratorStageController")
         
-    def initialize_planning_stage(self, state: GeneratorStageState) -> Command:
+    def initialize_planning_stage(self, state: GeneratorSwarmState) -> Command:
         """Initialize planning stage with Resource Configuration Agent as entry point"""
         return Command(
             goto="resource_configuration_agent",
@@ -35,7 +35,7 @@ class GeneratorStageController:
             graph=Command.PARENT
         )
     
-    def calculate_stage_completion(self, state: GeneratorStageState) -> float:
+    def calculate_stage_completion(self, state: GeneratorSwarmState) -> float:
         """Calculate overall planning stage completion percentage"""
         progress_values = list(state["planning_progress"].values())
         if not progress_values:
@@ -56,7 +56,7 @@ class GeneratorStageController:
         
         return min(weighted_sum, 1.0)
     
-    def check_stage_completion_conditions(self, state: GeneratorStageState) -> bool:
+    def check_stage_completion_conditions(self, state: GeneratorSwarmState) -> bool:
         """Comprehensive stage completion check"""
         # Check 1: All agents must be completed
         required_agents = [
@@ -90,7 +90,7 @@ class GeneratorStageController:
     @tool("check_planning_stage_completion")
     def check_and_transition_stage(
         self, 
-        state: Annotated[GeneratorStageState, InjectedState]
+        state: Annotated[GeneratorSwarmState, InjectedState]
     ) -> Command:
         """Check completion and transition to Enhancement stage if ready"""
         try:
@@ -167,7 +167,7 @@ class GeneratorStageController:
                 graph=Command.PARENT
             )
     
-    def determine_next_active_agent(self, state: GeneratorStageState) -> str:
+    def determine_next_active_agent(self, state: GeneratorSwarmState) -> str:
         """Intelligent agent selection based on dependencies and priorities"""
         try:
             # Priority 1: Agents with resolved dependencies
@@ -225,7 +225,7 @@ class GeneratorStageController:
             # Fallback to safe default
             return "resource_configuration_agent"
     
-    def check_agent_dependencies_met(self, agent_name: str, state: GeneratorStageState) -> bool:
+    def check_agent_dependencies_met(self, agent_name: str, state: GeneratorSwarmState) -> bool:
         """Check if agent's dependencies are satisfied"""
         required_deps = state["dependency_graph"].get(agent_name, set())
         
@@ -236,7 +236,7 @@ class GeneratorStageController:
                 
         return True
     
-    def get_agent_priority(self, agent_name: str, state: GeneratorStageState) -> int:
+    def get_agent_priority(self, agent_name: str, state: GeneratorSwarmState) -> int:
         """Calculate agent priority based on criticality and current state"""
         try:
             # Define priority weights (higher = more important)
@@ -283,7 +283,7 @@ class GeneratorStageController:
             # Return default priority for unknown agents
             return 1
     
-    def validate_state_integrity(self, state: GeneratorStageState) -> bool:
+    def validate_state_integrity(self, state: GeneratorSwarmState) -> bool:
         """Validate that the state has all required fields and is in a valid condition"""
         try:
             # Check required fields exist
@@ -351,7 +351,7 @@ class GeneratorStageController:
             )
             return False
     
-    def test_check_and_transition_stage(self, state: GeneratorStageState) -> bool:
+    def test_check_and_transition_stage(self, state: GeneratorSwarmState) -> bool:
         """Test version of check_and_transition_stage without @tool decorator"""
         try:
             # Validate state integrity first

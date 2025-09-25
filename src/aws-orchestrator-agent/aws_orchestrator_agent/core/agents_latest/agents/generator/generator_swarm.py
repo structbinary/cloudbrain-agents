@@ -12,19 +12,21 @@ based on the current state of the shared GeneratorStageState.
 import json
 import traceback
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Annotated
+from langgraph.prebuilt import InjectedState
 from pydantic import BaseModel
 from langgraph.graph import StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph_swarm import create_swarm
 from langgraph.prebuilt import create_react_agent
+from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger, log_sync
 from aws_orchestrator_agent.core.agents_latest.agents.base_agent import BaseSubgraphAgent
 from aws_orchestrator_agent.core.agents_latest.types import StateTransformer
-from .generator_state import GeneratorStageState, GeneratorAgentStatus, DependencyType
+from .generator_state import GeneratorSwarmState, GeneratorAgentStatus, DependencyType
 from aws_orchestrator_agent.core.agents_latest.types import SupervisorState
 from .generator_state_controller import GeneratorStageController
 from .generator_handoff_manager import GeneratorStageHandoffManager, create_completion_handoff_tool
@@ -86,6 +88,8 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
         
         # Set shared memory
         self.memory = memory or MemorySaver()
+
+        self.generator_swarm_state = None
         
         generator_swarm_logger.log_structured(
             level="DEBUG",
@@ -215,10 +219,10 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
             # Create a SupervisorState object for transformation
             supervisor_state = SupervisorState(**supervisor_state_dict)
             
-            # Transform to GeneratorStageState using existing StateTransformer
+            # Transform to GeneratorSwarmState using existing StateTransformer
             generator_state = StateTransformer.supervisor_to_generator_swarm(supervisor_state)
             
-            # Convert GeneratorStageState to dict (following base class pattern)
+            # Convert GeneratorSwarmState to dict (following base class pattern)
             return generator_state
             
         except Exception as e:
@@ -232,12 +236,12 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
                     "traceback": traceback.format_exc()
                 }
             )
-            # Return supervisor state with minimal generator_state
-            supervisor_state.generator_state = GeneratorStageState(
-                messages=[HumanMessage(content="Generate Terraform module from execution plan")],
+            # Return minimal generator state
+            from .generator_state import GeneratorSwarmState
+            return dict(GeneratorSwarmState(
+                internal_messages=[HumanMessage(content="Generate Terraform module from execution plan")],
                 active_agent="resource_configuration_agent"
-            )
-            return supervisor_state
+            ))
     
     
     def output_transform(self, agent_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -264,61 +268,19 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
                 }
             )
             
-            # Extract generated artifacts from agent workspaces
-            agent_workspaces = agent_state.get("agent_workspaces", {})
+            # Convert dict back to GeneratorSwarmState for transformation
+            from .generator_state import GeneratorSwarmState
+            generator_state = GeneratorSwarmState(**agent_state)
             
-            # Collect all generated artifacts
-            generated_resources = agent_workspaces.get("resource_configuration_agent", {}).get("generated_resources", [])
-            generated_variables = agent_workspaces.get("variable_definition_agent", {}).get("generated_variables", [])
-            generated_data_sources = agent_workspaces.get("data_source_agent", {}).get("generated_data_sources", [])
-            generated_locals = agent_workspaces.get("local_values_agent", {}).get("generated_locals", [])
-            generated_outputs = agent_workspaces.get("output_definition_agent", {}).get("generated_outputs", [])
-            
-            # Extract planning context for metadata
-            planning_context = agent_state.get("planning_context", {})
-            
-            # Extract stage progress and agent status
-            stage_progress = agent_state.get("stage_progress", {})
-            agent_status_matrix = agent_state.get("agent_status_matrix", {})
-            
-            # Create comprehensive generation data
-            generation_data = {
-                "generated_resources": generated_resources,
-                "generated_variables": generated_variables,
-                "generated_data_sources": generated_data_sources,
-                "generated_locals": generated_locals,
-                "generated_outputs": generated_outputs,
-                "module_name": planning_context.get("module_name", "terraform-module"),
-                "service_name": planning_context.get("service_name", "Unknown Service"),
-                "target_environment": planning_context.get("target_environment", "prod"),
-                "stage_progress": stage_progress,
-                "agent_status_matrix": agent_status_matrix,
-                "generation_complete": agent_state.get("stage_status") == "planning_complete",
-                "total_artifacts": len(generated_resources) + len(generated_variables) + 
-                                 len(generated_data_sources) + len(generated_locals) + len(generated_outputs)
-            }
-            
-            # Create supervisor state updates
-            supervisor_updates = {
-                "generation_data": generation_data,
-                "generated_module_ref": f"terraform-module-{planning_context.get('module_name', 'unknown')}",
-                "question": None,  # Generator swarm doesn't typically ask questions
-                "current_agent": None,  # Generation complete, supervisor decides next step
-                "workflow_state": {
-                    "generation_complete": True,
-                    "next_agent": "validation_agent",  # Default next step
-                }
-            }
+            # Transform back to supervisor updates using StateTransformer
+            supervisor_updates = StateTransformer.generator_to_supervisor(generator_state)
             
             generator_swarm_logger.log_structured(
                 level="INFO",
                 message="Successfully transformed generator swarm state to supervisor updates",
                 extra={
-                    "generation_data_keys": list(generation_data.keys()),
-                    "total_artifacts": generation_data["total_artifacts"],
-                    "module_name": generation_data["module_name"],
-                    "generation_complete": generation_data["generation_complete"],
-                    "supervisor_updates_keys": list(supervisor_updates.keys())
+                    "supervisor_updates_keys": list(supervisor_updates.keys()),
+                    "generation_data_keys": list(supervisor_updates.get("generation_data", {}).keys())
                 }
             )
             
@@ -337,21 +299,18 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
             # Return minimal fallback updates
             return {
                 "generation_data": {
-                    "generated_resources": [],
-                    "generated_variables": [],
-                    "generated_data_sources": [],
-                    "generated_locals": [],
-                    "generated_outputs": [],
-                    "generation_complete": False,
-                    "total_artifacts": 0
+                    "generated_module": {
+                        "resources": [],
+                        "variables": [],
+                        "data_sources": [],
+                        "locals": [],
+                        "outputs": []
+                    },
+                    "status": "error",
+                    "error": str(e)
                 },
-                "generated_module_ref": "terraform-module-fallback",
-                "question": None,
-                "current_agent": None,
-                "workflow_state": {
-                    "generation_complete": False,
-                    "next_agent": None,
-                }
+                "status": "failed",
+                "current_agent": None
             }
     
     @property
@@ -362,7 +321,8 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
     @property
     def state_model(self) -> type[BaseModel]:
         """Get the state model for this agent."""
-        return GeneratorStageState
+        from .generator_state import GeneratorSwarmState
+        return GeneratorSwarmState
     
     def _create_resource_agent(self):
         """Create the Resource Configuration Agent."""
@@ -371,11 +331,44 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
             message="Creating resource configuration agent",
             extra={}
         )
+        # if input_state is None:
+        #     input_state = self.generator_swarm_state
         
-        return create_react_agent(
+        # Create a state injection tool that ensures the current state is available
+        @tool("inject_current_state_for_terraform")
+        def inject_current_state_for_terraform(
+            state: Annotated[Any, InjectedState] = None,
+        ) -> dict:
+            """Inject the current state into the graph state for terraform resource generation."""
+            current_state = getattr(self, 'generator_swarm_state', None)
+            if current_state:
+                # Merge current_state into the existing state
+                merged_state = {**(state or {}), **current_state}
+                
+                generator_swarm_logger.log_structured(
+                    level="DEBUG",
+                    message="Injecting current state for terraform resource generation",
+                    extra={
+                        "current_state_keys": list(current_state.keys()),
+                        "merged_state_keys": list(merged_state.keys()),
+                        "has_execution_plan_data": "execution_plan_data" in merged_state,
+                        "has_agent_workspaces": "agent_workspaces" in merged_state,
+                        "has_planning_context": "planning_context" in merged_state
+                    }
+                )
+                
+                # Return the merged state as updates
+                return merged_state
+            else:
+                return state or {}
+        
+        # Create the agent
+        agent = create_react_agent(
             model=self.model,
+            # state_schema=input_state,
             tools=[
-                generate_terraform_resources,  # Core function
+                inject_current_state_for_terraform,  # State injection tool
+                generate_terraform_resources,  # Main tool that uses InjectedState
                 self.handoff_manager.create_dependency_aware_handoff_tool(
                     "variable_definition_agent", 
                     DependencyType.RESOURCE_TO_VARIABLE,
@@ -408,12 +401,28 @@ Generate production-ready AWS Terraform resources that implement infrastructure 
 ## SYSTEM CONTEXT
 - **Architecture**: Multi-agent swarm with Resource, Variable, Data Source, and Local Values agents
 - **Workflow**: Planning stage with dynamic handoffs based on dependencies
-- **State**: Shared GeneratorStageState with agent workspaces and planning context
+- **State**: Shared GeneratorSwarmState with agent workspaces and planning context
+
+## STATE STRUCTURE
+The state contains the following key fields:
+- `execution_plan_data`: Contains execution plans with resource configurations
+- `agent_workspaces.resource_configuration_agent`: Contains your workspace data including planner_input
+- `planning_context`: Contains planning requirements and context
+- `active_agent`: Current active agent (should be "resource_configuration_agent")
 
 ## INPUT PROCESSING
 1. **Planner Data**: Process resource_configurations from execution_plan_data
 2. **Agent Requests**: Handle handoffs from other agents requiring new resources
 3. **Context Integration**: Combine planner specs with agent collaboration context
+
+## CRITICAL: TOOL USAGE
+**MANDATORY WORKFLOW:**
+1. **FIRST**: Call `inject_current_state_for_terraform` to inject the current state into the graph
+   - This tool returns the merged state data that will be used as input for the next tool
+2. **THEN**: Call `generate_terraform_resources` to process the input data and generate the actual Terraform resources
+   - This tool will automatically receive the state data returned by the injection tool
+
+Do not provide general responses - use the tools to perform the actual work. The state injection tool must be called first to ensure the current state is available for resource generation.
 
 ## RESOURCE GENERATION PROTOCOL
 
@@ -500,6 +509,8 @@ When resource needs undefined variable:
 
 Remember: You are the infrastructure implementation specialist. Prioritize reliability, efficiency, and proper coordination with other agents."""
         )
+        
+        return agent
 
     def _create_variable_agent(self):
         """Create the Variable Definition Agent."""
@@ -550,6 +561,18 @@ Generate production-ready Terraform variable definitions that provide flexible i
 1. **Planner Data**: Process variable_definitions from execution_plan_data
 2. **Agent Requests**: Handle handoffs from other agents requiring new variables
 3. **Context Integration**: Combine planner specs with agent collaboration context
+
+## CRITICAL: TOOL USAGE
+**ALWAYS start by calling the `generate_terraform_variables` tool** with the execution plan data, agent workspace, and planning context to process the input data and generate the actual Terraform variables. Do not provide general responses - use the tool to perform the actual work.
+
+**Tool Call Format:**
+```json
+{
+  "execution_plan_data": {...},
+  "agent_workspace": {...},
+  "planning_context": {...}
+}
+```
 
 ## VARIABLE GENERATION PROTOCOL
 
@@ -692,6 +715,18 @@ Generate production-ready AWS Terraform data sources that discover external infr
 2. **Agent Requests**: Handle handoffs from other agents requiring new data sources
 3. **Context Integration**: Combine planner specs with agent collaboration context
 
+## CRITICAL: TOOL USAGE
+**ALWAYS start by calling the `generate_terraform_data_sources` tool** with the execution plan data, agent workspace, and planning context to process the input data and generate the actual Terraform data sources. Do not provide general responses - use the tool to perform the actual work.
+
+**Tool Call Format:**
+```json
+{
+  "execution_plan_data": {...},
+  "agent_workspace": {...},
+  "planning_context": {...}
+}
+```
+
 ## DATA SOURCE GENERATION PROTOCOL
 
 ### Step 1: Data Source Analysis
@@ -825,6 +860,18 @@ Generate production-ready Terraform local values that simplify complex expressio
 1. **Planner Data**: Process local_values from execution_plan_data
 2. **Agent Requests**: Handle handoffs from other agents requiring new local values
 3. **Context Integration**: Combine planner specs with agent collaboration context
+
+## CRITICAL: TOOL USAGE
+**ALWAYS start by calling the `generate_terraform_local_values` tool** with the execution plan data, agent workspace, and planning context to process the input data and generate the actual Terraform local values. Do not provide general responses - use the tool to perform the actual work.
+
+**Tool Call Format:**
+```json
+{
+  "execution_plan_data": {...},
+  "agent_workspace": {...},
+  "planning_context": {...}
+}
+```
 
 ## LOCAL VALUE GENERATION PROTOCOL
 
@@ -984,6 +1031,18 @@ Generate production-ready Terraform output values that expose critical infrastru
 2. **Agent Requests**: Handle handoffs from other agents requiring new outputs
 3. **Context Integration**: Combine planner specs with agent collaboration context
 
+## CRITICAL: TOOL USAGE
+**ALWAYS start by calling the `generate_terraform_outputs` tool** with the execution plan data, agent workspace, and planning context to process the input data and generate the actual Terraform outputs. Do not provide general responses - use the tool to perform the actual work.
+
+**Tool Call Format:**
+```json
+{
+  "execution_plan_data": {...},
+  "agent_workspace": {...},
+  "planning_context": {...}
+}
+```
+
 ## OUTPUT GENERATION PROTOCOL
 
 ### Step 1: Output Analysis
@@ -1101,6 +1160,158 @@ When output needs undefined resource:
 Remember: You are the information exposure specialist. Prioritize security, usability, and proper coordination with other agents."""
         )
     
+    def build_subgraph(self) -> StateGraph:
+        """
+        Build the generator swarm as a standalone subgraph with isolated state schema.
+        
+        This method creates a subgraph that can be used as a node in the supervisor graph.
+        It uses the existing build_graph() method which creates the swarm.
+        
+        Returns:
+            StateGraph: Compiled subgraph with GeneratorSwarmState schema
+        """
+        try:
+            generator_swarm_logger.log_structured(
+                level="INFO",
+                message="Building generator swarm subgraph",
+                extra={
+                    "state_schema": "GeneratorSwarmState",
+                    "agent_name": getattr(self, '_name', 'unknown')
+                }
+            )
+            
+            # Use the existing build_graph() method which creates the swarm
+            # Then compile it to get a compiled graph that can be used as a subgraph
+            planning_swarm = self.build_graph()
+            compiled_swarm = planning_swarm.compile(name=self.name)
+            
+            generator_swarm_logger.log_structured(
+                level="INFO",
+                message="Generator swarm subgraph built successfully",
+                extra={
+                    "subgraph_type": type(compiled_swarm).__name__,
+                    "subgraph_name": getattr(compiled_swarm, 'name', 'unknown'),
+                    "nodes": list(compiled_swarm.nodes.keys()) if hasattr(compiled_swarm, 'nodes') else "unknown"
+                }
+            )
+            
+            return compiled_swarm
+            
+        except Exception as e:
+            generator_swarm_logger.log_structured(
+                level="ERROR",
+                message="Failed to build generator swarm subgraph",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "traceback": traceback.format_exc()
+                }
+            )
+            raise
+
+    def create_wrapper_function(self):
+        """
+        Create a wrapper function for langgraph-supervisor integration.
+        
+        This is the EXACT pattern required for create_supervisor with different state schemas.
+        
+        Returns:
+            Callable: Async wrapper function that handles state transformation
+        """
+        # Create the generator subgraph using create_swarm prebuilt method
+        # This ensures proper state injection for tools with InjectedState
+        compiled_subgraph = self.build_graph().compile()
+        
+        async def generator_swarm_wrapper(supervisor_state: SupervisorState, config: dict = None, **kwargs) -> GeneratorSwarmState:
+            """
+            Wrapper function that handles state transformation between supervisor and generator subgraph.
+            
+            This follows the exact pattern from LangGraph subgraphs documentation:
+            1. Transform supervisor state to generator state
+            2. Call the subgraph
+            3. Transform generator output back to supervisor updates
+            
+            Args:
+                supervisor_state: SupervisorState from parent graph
+                config: Optional configuration dict (for langgraph-supervisor compatibility)
+                **kwargs: Additional keyword arguments (for langgraph-supervisor compatibility)
+                
+            Returns:
+                Dict[str, Any]: Updates to merge into supervisor state
+            """
+            try:
+                generator_swarm_logger.log_structured(
+                    level="INFO",
+                    message="Generator swarm wrapper: Processing supervisor state",
+                    extra={
+                        "supervisor_state_type": type(supervisor_state).__name__,
+                        "has_planner_data": hasattr(supervisor_state, 'planner_data') and supervisor_state.planner_data is not None,
+                        "config_provided": config is not None,
+                        "additional_kwargs": list(kwargs.keys()) if kwargs else []
+                    }
+                )
+                
+                # 1. Transform supervisor state to generator state (single transformation)
+                generator_input = StateTransformer.supervisor_to_generator_swarm(supervisor_state)
+                self.generator_swarm_state = generator_input
+                generator_swarm_logger.log_structured(
+                    level="INFO",
+                    message="Generator swarm wrapper: About to invoke subgraph",
+                    extra={
+                        "generator_input_keys": list(generator_input.keys()),
+                        "active_agent": generator_input.get("active_agent"),
+                        "stage_status": generator_input.get("stage_status"),
+                        "has_agent_workspaces": "agent_workspaces" in generator_input
+                    }
+                )
+                
+                # 2. Call the subgraph asynchronously (following reference pattern)
+                generator_output = await compiled_subgraph.ainvoke(generator_input)
+                
+                generator_swarm_logger.log_structured(
+                    level="INFO",
+                    message="Generator swarm wrapper: Subgraph execution completed",
+                    extra={
+                        "generator_output_keys": list(generator_output.keys()),
+                        "output_active_agent": generator_output.get("active_agent"),
+                        "output_stage_status": generator_output.get("stage_status"),
+                        "has_agent_workspaces": "agent_workspaces" in generator_output
+                    }
+                )
+                
+                # 3. Transform generator output back to supervisor updates (following reference pattern)
+                supervisor_updates = StateTransformer.generator_to_supervisor(generator_output)
+                
+                generator_swarm_logger.log_structured(
+                    level="INFO",
+                    message="Generator swarm wrapper: Successfully processed state",
+                    extra={
+                        "generator_output_type": type(generator_output).__name__,
+                        "supervisor_updates_keys": list(supervisor_updates.keys())
+                    }
+                )
+                
+                return supervisor_updates
+                
+            except Exception as e:
+                generator_swarm_logger.log_structured(
+                    level="ERROR",
+                    message="Generator swarm wrapper: Failed to process state",
+                    extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "traceback": traceback.format_exc()
+                    }
+                )
+                # Handle errors gracefully
+                return {
+                    "generation_data": {"status": "error", "error": str(e)},
+                    "status": "failed",
+                    "current_agent": None
+                }
+        
+        return generator_swarm_wrapper
+
     def build_graph(self) -> StateGraph:
         """
         Build the LangGraph StateGraph for the generator swarm agent.
@@ -1157,7 +1368,7 @@ Remember: You are the information exposure specialist. Prioritize security, usab
                 level="DEBUG",
                 message="Creating swarm with agents",
                 extra={
-                    "state_schema": "GeneratorStageState",
+                    "state_schema": "GeneratorSwarmState",
                     "default_active_agent": "resource_configuration_agent"
                 }
             )
@@ -1165,7 +1376,7 @@ Remember: You are the information exposure specialist. Prioritize security, usab
             planning_swarm = create_swarm(
                 agents=[resource_agent, variable_agent, data_source_agent, local_values_agent, output_agent],
                 default_active_agent="resource_configuration_agent",
-                state_schema=GeneratorStageState
+                state_schema=GeneratorSwarmState
             )
             
             # # Add coordination nodes
@@ -1203,7 +1414,7 @@ Remember: You are the information exposure specialist. Prioritize security, usab
                     "compiled_swarm_type": type(planning_swarm).__name__,
                     "agents_count": 5,
                     "coordination_nodes": 0,
-                    "state_schema": "GeneratorStageState"
+                    "state_schema": "GeneratorSwarmState"
                 }
             )
             

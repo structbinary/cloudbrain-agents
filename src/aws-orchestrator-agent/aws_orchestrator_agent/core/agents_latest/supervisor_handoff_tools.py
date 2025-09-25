@@ -10,7 +10,7 @@ This module implements custom handoff tools that:
 from typing import Annotated, Dict, Any, Optional
 from langchain_core.tools import tool, BaseTool, InjectedToolCallId
 from langchain_core.messages import ToolMessage, HumanMessage
-from langgraph.types import Command
+from langgraph.types import Command, Send
 from langgraph.prebuilt import InjectedState
 from langgraph_supervisor.handoff import METADATA_KEY_HANDOFF_DESTINATION
 from aws_orchestrator_agent.core.agents_latest.types import StateTransformer
@@ -262,32 +262,28 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
                     "messages_count": len(state_update.get("messages", [])),
                 }
             )
-        elif agent_name == "generator_swarm":            
-            # For generator_swarm, pass the full supervisor state data in the send_payload
-            # The generator_swarm's input_transform method will handle the transformation
+        elif agent_name == "generator_swarm":
+            # For generator_swarm, pass only what StateTransformer.supervisor_to_generator_swarm needs
+            # The transformation node wrapper will handle the state transformation
             state_update = {
                 "messages": messages + [tool_message],
-                # Include all the supervisor state data that input_transform needs
-                "user_request": user_request if user_request else task_description,
                 "session_id": session_id,
                 "task_id": task_id,
-                "planner_data": state_dict.get("planner_data", {}),
-                "workspace_ref": state_dict.get("workspace_ref"),
-                "terraform_context": state_dict.get("terraform_context", {}),
+                "planner_data": state_dict.get("planner_data"),
             }
             
-            # Log the nested state approach details
+            # Log the transformation node wrapper approach
             handoff_logger.log_structured(
                 level="DEBUG",
-                message=f"Using nested state approach for {agent_name}",
+                message=f"Using transformation node wrapper approach for {agent_name}",
                 extra={
                     "agent_name": agent_name,
-                    "transformation_method": "nested_generator_state",
+                    "transformation_method": "transformation_node_wrapper",
                     "state_update_keys": list(state_update.keys()),
                     "messages_count": len(state_update.get("messages", [])),
-                    "has_planner_data": "planner_data" in state_dict,
-                    "note": "generator_state will be created by GeneratorSwarmAgent.input_transform()",
-                    "architecture": "nested_state_approach"
+                    "has_planner_data": state_update.get("planner_data") is not None,
+                    "note": "Minimal state passed - StateTransformer only needs planner_data, session_id, task_id",
+                    "architecture": "transformation_node_wrapper"
                 }
             )
         else:
@@ -341,6 +337,7 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
         # Return Command to transfer control to the target agent
         # Use explicit state update to ensure only the fields we want are passed
         
+        # Use Command for all agents - simple routing to wrapper function
         return Command(
             goto=agent_name,
             graph=Command.PARENT,

@@ -18,7 +18,7 @@ from langchain_core.messages import AnyMessage, HumanMessage
 from langgraph.graph.message import add_messages
 
 # Import generator types for StateTransformer
-from .agents.generator.generator_state import GeneratorStageState, GeneratorAgentStatus
+from .agents.generator.generator_state import GeneratorSwarmState, GeneratorAgentStatus
 
 
 
@@ -325,7 +325,7 @@ class SupervisorState(BaseModel):
     cost_data: Optional[Dict[str, Any]] = None
     
     # # Generator Swarm State (nested approach)
-    # generator_state: Optional[GeneratorStageState] = None
+    # generator_state: Optional[GeneratorSwarmState] = None
     
     # Generation-specific context fields (extracted from planner_data for direct access)
     execution_plan: Optional[Dict[str, Any]] = None  # Direct access to execution plan
@@ -629,12 +629,22 @@ class StateTransformer:
         )
     
     @staticmethod
-    def supervisor_to_generator_swarm(supervisor_state: SupervisorState) -> GeneratorStageState:
+    def supervisor_to_generator_swarm(supervisor_state: SupervisorState) -> GeneratorSwarmState:
         """Transform supervisor state to generator swarm state with actual planner output structure."""
         # Extract planner data and execution plan from the actual structure
         # messages = supervisor_state.messages
         # llm_input_messages = supervisor_state.llm_input_messages
-        planner_data = supervisor_state.planner_data or {}
+        
+        # Handle both dict and SupervisorState objects
+        if isinstance(supervisor_state, dict):
+            planner_data = supervisor_state.get("planner_data", {})
+            session_id = supervisor_state.get("session_id")
+            task_id = supervisor_state.get("task_id")
+        else:
+            planner_data = supervisor_state.planner_data or {}
+            session_id = supervisor_state.session_id
+            task_id = supervisor_state.task_id
+            
         execution_data = planner_data.get("execution_data", {})
         execution_plan_data = execution_data.get("execution_plan_data", {})
         
@@ -655,7 +665,7 @@ class StateTransformer:
         # Create default human message for generator swarm
         default_message = HumanMessage(content="Generate Terraform module from execution plan")
         
-        return GeneratorStageState(
+        return GeneratorSwarmState(
             active_agent="resource_configuration_agent",
             stage_status="planning_active",
             planning_progress={
@@ -742,8 +752,8 @@ class StateTransformer:
                     "resource_dependencies": dependencies  # resource_dependencies from execution plan
                 }
             },
-            session_id=supervisor_state.session_id,
-            task_id=supervisor_state.task_id,
+            session_id=session_id,
+            task_id=task_id,
             handoff_queue=[],
             communication_log=[],
             checkpoint_metadata={},
@@ -785,8 +795,66 @@ class StateTransformer:
             },
             
             # Current stage
-            current_stage="planning"
+            current_stage="planning",
+            
+            # Generator-specific context
+            generation_context={
+                "module_name": primary_execution_plan.get("module_name", "terraform-module"),
+                "service_name": primary_execution_plan.get("service_name", "Unknown Service"),
+                "target_environment": primary_execution_plan.get("target_environment", "prod"),
+                "terraform_version": primary_execution_plan.get("terraform_version_constraint", ">= 1.0.0"),
+                "provider_versions": primary_execution_plan.get("required_providers", {})
+            },
+            
+            # Completion metrics
+            completion_metrics={
+                "total_agents": 5,
+                "completed_agents": 0,
+                "generation_started_at": None,
+                "generation_completed_at": None
+            }
         )
+    
+    @staticmethod
+    def generator_to_supervisor(generator_state: GeneratorSwarmState) -> Dict[str, Any]:
+        """
+        Transform generator state back to supervisor updates.
+        
+        Args:
+            generator_state: Final generator state
+            
+        Returns:
+            Dict[str, Any]: Updates to merge into supervisor state
+        """
+        # Extract generated content from agent workspaces with safe access
+        agent_workspaces = generator_state.get("agent_workspaces", {})
+        generated_resources = agent_workspaces.get("resource_configuration_agent", {}).get("generated_resources", [])
+        generated_variables = agent_workspaces.get("variable_definition_agent", {}).get("generated_variables", [])
+        generated_data_sources = agent_workspaces.get("data_source_agent", {}).get("generated_data_sources", [])
+        generated_locals = agent_workspaces.get("local_values_agent", {}).get("generated_locals", [])
+        generated_outputs = agent_workspaces.get("output_definition_agent", {}).get("generated_outputs", [])
+        
+        # Create generation data for supervisor
+        generation_data = {
+            "generated_module": {
+                "resources": generated_resources,
+                "variables": generated_variables,
+                "data_sources": generated_data_sources,
+                "locals": generated_locals,
+                "outputs": generated_outputs
+            },
+            "generation_metrics": generator_state.get("completion_metrics", {}),
+            "generation_context": generator_state.get("generation_context", {}),
+            "status": "completed" if generator_state.get("stage_status") == "planning_complete" else "in_progress"
+        }
+        
+        # Return supervisor updates
+        return {
+            "generation_data": generation_data,
+            "status": "completed" if generator_state.get("stage_status") == "planning_complete" else "in_progress",
+            "current_agent": None,  # Generation complete
+            "messages": generator_state.get("internal_messages", [])  # Pass messages back to supervisor
+        }
     
     @staticmethod
     def supervisor_to_validation(supervisor_state: SupervisorState) -> ValidationState:

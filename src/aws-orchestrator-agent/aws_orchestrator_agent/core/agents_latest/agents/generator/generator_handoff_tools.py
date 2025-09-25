@@ -11,7 +11,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from langgraph.prebuilt import InjectedState
 
-from .generator_state import GeneratorStageState
+from .generator_state import GeneratorSwarmState
 from aws_orchestrator_agent.utils.logger import AgentLogger
 
 # Create logger
@@ -30,7 +30,7 @@ def create_handoff_to_generator_complete() -> BaseTool:
     def handoff_to_generator_complete(
         completion_summary: Annotated[str, "Summary of what was generated and completed"],
         generated_artifacts: Annotated[Dict[str, Any], "Summary of all generated artifacts"],
-        state: Annotated[GeneratorStageState, InjectedState],
+        state: Annotated[GeneratorSwarmState, InjectedState],
         tool_call_id: Annotated[str, InjectedToolCallId]
     ) -> Command:
         """

@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt import InjectedState
-from aws_orchestrator_agent.core.agents_latest.agents.generator.generator_state import GeneratorStageState
+from aws_orchestrator_agent.core.agents_latest.agents.generator.generator_state import GeneratorSwarmState
 from aws_orchestrator_agent.core.agents_latest.types import SupervisorState
 from langgraph.types import Command
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
@@ -205,31 +205,60 @@ class TerraformResourceGenerationResponse(BaseModel):
             raise ValueError(f'Status must be one of: {valid_statuses}')
         return v
 
+
+
 @tool("generate_terraform_resources")
-async def generate_terraform_resources(state: Annotated[Any, InjectedState]) -> TerraformResourceGenerationResponse:
+def generate_terraform_resources(
+    previous_state: str,
+    state: Annotated[Any, InjectedState] = None,
+) -> TerraformResourceGenerationResponse:
     """
     Generate Terraform AWS resource blocks from execution plan specifications and agent requests.
     
-    This tool analyzes resource requirements, generates HCL blocks, identifies dependencies,
+    Args:
+        previous_state: Previous state of the graph
+        state: GeneratorSwarmState containing all the data (execution_plan_data, agent_workspaces, planning_context)
+    
+    This function analyzes resource requirements, generates HCL blocks, identifies dependencies,
     and provides handoff recommendations to other agents in the planning stage. It supports
     both planner specifications and dynamic agent communication.
-    
-    Includes Human-in-the-Loop approval checks for high-cost, security-critical, cross-region,
-    and experimental resource operations.
     """
+    if isinstance(previous_state, str):
+        try:
+            previous_state = json.loads(previous_state)
+        except json.JSONDecodeError as e:
+            previous_state = {}
+            resource_generator_logger.log_structured(
+                level="ERROR",
+                message="Failed to parse previous state JSON",
+                extra={"error": str(e)})
     
     try:
-        start_time = datetime.now()
+        # Extract data from injected state
+        if state:
+            execution_plan_data = state.get("execution_plan_data", {})
+            agent_workspace = state.get("agent_workspaces", {}).get("resource_configuration_agent", {})
+            planning_context = state.get("planning_context", {})
+        else:
+            execution_plan_data = previous_state.get("execution_plan_data", {})
+            agent_workspace = previous_state.get("agent_workspaces", {}).get("resource_configuration_agent", {})
+            planning_context = previous_state.get("planning_context", {})
         
-        # Fetch all data from state
-        agent_workspace = state.get('agent_workspaces', {}).get('resource_configuration_agent', {})
-        planning_context = state.get('planning_context', {})
+        start_time = datetime.now()
         
         # Get resource specifications from planner input or current task
         resource_specifications = (
             agent_workspace.get('current_task', {}).get('resource_specifications', []) or
             agent_workspace.get('planner_input', [])
         )
+        
+        # If we don't have resource specifications from agent workspace, try execution plan data
+        if not resource_specifications and execution_plan_data:
+            execution_plans = execution_plan_data.get('execution_plans', [])
+            if execution_plans:
+                # Get resource configurations from the first execution plan
+                first_plan = execution_plans[0]
+                resource_specifications = first_plan.get('resource_configurations', [])
         
         # Get generation context from planning context
         generation_context = planning_context
@@ -239,9 +268,9 @@ async def generate_terraform_resources(state: Annotated[Any, InjectedState]) -> 
             message="Starting Terraform resource generation",
             extra={
                 "resource_specifications_count": len(resource_specifications),
-                "generation_id": generator_state.get('generation_id', 'unknown'),
-                "current_stage": generator_state.get('current_stage', 'unknown'),
-                "active_agent": generator_state.get('active_agent', 'unknown')
+                "has_execution_plan_data": bool(execution_plan_data),
+                "has_agent_workspace": bool(agent_workspace),
+                "has_planning_context": bool(planning_context)
             }
         )
         
@@ -249,7 +278,7 @@ async def generate_terraform_resources(state: Annotated[Any, InjectedState]) -> 
         approval_results = []
         for resource_spec in resource_specifications:
             approval_context = _prepare_approval_context(resource_spec, generation_context)
-            approval_result = _check_resource_approval(approval_context, state)
+            approval_result = _check_resource_approval(approval_context, agent_workspace)
             approval_results.append(approval_result)
             
             # If approval is rejected, skip this resource
@@ -269,14 +298,14 @@ async def generate_terraform_resources(state: Annotated[Any, InjectedState]) -> 
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
-            generation_id=generator_state.get('generation_id', str(uuid.uuid4())),
+            generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
             resource_specifications=escape_json_for_template(json.dumps(resource_specifications, indent=2)),
-            current_stage=generator_state.get('current_stage', 'planning'),
-            active_agent=generator_state.get('active_agent', 'resource_configuration_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(generator_state.get('resolved_dependencies', {}), indent=2)),
+            current_stage=planning_context.get('current_stage', 'planning'),
+            active_agent=agent_workspace.get('active_agent', 'resource_configuration_agent'),
+            previous_agent_results=escape_json_for_template(json.dumps(agent_workspace.get('resolved_dependencies', {}), indent=2)),
             generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
             specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(generator_state.get('handoff_context', {}), indent=2)),
+            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2)),
             agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
         )
         
@@ -340,12 +369,12 @@ async def generate_terraform_resources(state: Annotated[Any, InjectedState]) -> 
             message="Executing LLM chain for resource generation",
             extra={
                 "prompt_length": len(formatted_user_prompt),
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         # Execute the chain
-        llm_response = await chain.ainvoke({})
+        llm_response = chain.invoke({})
         
         resource_generator_logger.log_structured(
             level="DEBUG",
@@ -353,14 +382,14 @@ async def generate_terraform_resources(state: Annotated[Any, InjectedState]) -> 
             extra={
                 "generated_resources_count": len(llm_response.generated_resources),
                 "discovered_dependencies_count": len(llm_response.discovered_dependencies),
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         # Post-process and enhance response
         enhanced_response = post_process_llm_response(
             llm_response, 
-            state, 
+            agent_workspace, 
             generation_context, 
             start_time
         )
@@ -373,25 +402,25 @@ async def generate_terraform_resources(state: Annotated[Any, InjectedState]) -> 
                 "final_dependencies_count": len(enhanced_response.discovered_dependencies),
                 "generation_duration_seconds": enhanced_response.generation_metadata.generation_duration_seconds,
                 "completion_status": enhanced_response.completion_status,
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         return enhanced_response
         
     except Exception as e:
-        generator_state = state.get('generator_state', {})
         resource_generator_logger.log_structured(
             level="ERROR",
             message="Terraform resource generation failed",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
-                "generation_id": generator_state.get('generation_id', 'unknown'),
-                "current_stage": generator_state.get('current_stage', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown'),
+                "current_stage": planning_context.get('current_stage', 'unknown')
             }
         )
-        return create_error_response(e, generator_state, datetime.now())
+        return create_error_response(e, agent_workspace, datetime.now())
+
 
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
     """Extract specific requirements from context"""
@@ -415,7 +444,7 @@ def extract_specific_requirements(context: Dict[str, Any]) -> str:
 
 def post_process_llm_response(
     llm_response: TerraformResourceGenerationResponse,
-    state: Dict[str, Any], 
+    agent_workspace: Dict[str, Any], 
     context: Dict[str, Any],
     start_time: datetime
 ) -> TerraformResourceGenerationResponse:
@@ -465,7 +494,7 @@ def post_process_llm_response(
     llm_response.state_updates = create_comprehensive_state_updates(
         validated_resources,
         enhanced_dependencies,
-        state,
+        agent_workspace,
         llm_response.completion_status
     )
     
@@ -787,7 +816,7 @@ def create_enhanced_handoff_recommendations(
 def create_comprehensive_state_updates(
     resources: List[TerraformResourceBlock],
     dependencies: List[DiscoveredDependency],
-    current_state: Dict[str, Any],
+    agent_workspace: Dict[str, Any],
     completion_status: str
 ) -> Dict[str, Any]:
     """Create comprehensive state updates for the swarm"""
@@ -795,15 +824,15 @@ def create_comprehensive_state_updates(
     updates = {
         'terraform_resources': [resource.dict() for resource in resources],
         'pending_dependencies': {
-            **current_state.get('pending_dependencies', {}),
+            **agent_workspace.get('pending_dependencies', {}),
             'resource_configuration_agent': [dep.dict() for dep in dependencies]
         },
         'agent_status_matrix': {
-            **current_state.get('agent_status_matrix', {}),
+            **agent_workspace.get('agent_status_matrix', {}),
             'resource_configuration_agent': completion_status
         },
         'planning_progress': {
-            **current_state.get('planning_progress', {}),
+            **agent_workspace.get('planning_progress', {}),
             'resource_configuration_agent': 1.0 if completion_status == 'completed' else 0.6
         }
     }
@@ -853,7 +882,7 @@ def create_checkpoint_data(
 
 def create_error_response(
     error: Exception, 
-    state: Dict[str, Any], 
+    agent_workspace: Dict[str, Any], 
     start_time: datetime
 ) -> TerraformResourceGenerationResponse:
     """Create error response when tool execution fails"""
@@ -875,7 +904,7 @@ def create_error_response(
         ),
         state_updates={
             'agent_status_matrix': {
-                **state.get('agent_status_matrix', {}),
+                **agent_workspace.get('agent_status_matrix', {}),
                 'resource_configuration_agent': 'error'
             }
         },
@@ -1039,3 +1068,4 @@ def _assess_security_impact(resource_spec: Dict[str, Any]) -> str:
         return "medium"
     
     return "low"
+

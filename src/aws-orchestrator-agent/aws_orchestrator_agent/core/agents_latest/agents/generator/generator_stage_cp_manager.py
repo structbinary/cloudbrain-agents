@@ -3,7 +3,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from langgraph.prebuilt import InjectedState
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from .generator_state import GeneratorStageState, GeneratorAgentStatus
+from .generator_state import GeneratorSwarmState, GeneratorAgentStatus
 from aws_orchestrator_agent.utils.logger import AgentLogger
 import datetime
 
@@ -15,7 +15,7 @@ class GeneratorStageCheckpointManager:
         self.checkpoint_frequency = 30  # seconds
         self.logger = AgentLogger("GeneratorStageCheckpointManager")
     
-    def create_checkpoint(self, state: GeneratorStageState, event_type: str) -> Dict[str, Any]:
+    def create_checkpoint(self, state: GeneratorSwarmState, event_type: str) -> Dict[str, Any]:
         """Create comprehensive checkpoint with recovery metadata"""
         try:
             checkpoint_id = f"planning_{int(datetime.datetime.now().timestamp())}"
@@ -94,7 +94,7 @@ class GeneratorStageCheckpointManager:
             )
             raise
     
-    def test_checkpoint_current_state(self, event_type: str, state: GeneratorStageState) -> bool:
+    def test_checkpoint_current_state(self, event_type: str, state: GeneratorSwarmState) -> bool:
         """Test version of checkpoint_current_state without @tool decorator"""
         try:
             checkpoint_data = self.create_checkpoint(state, event_type)
@@ -115,7 +115,7 @@ class GeneratorStageCheckpointManager:
     def checkpoint_current_state(
         self,
         event_type: Annotated[str, "Type of checkpoint event"],
-        state: Annotated[GeneratorStageState, InjectedState]
+        state: Annotated[GeneratorSwarmState, InjectedState]
     ) -> Command:
         """Tool for agents to create checkpoints at critical points"""
         try:
@@ -161,7 +161,7 @@ class GeneratorStageCheckpointManager:
             )
     
     # Helper methods for checkpoint metadata extraction
-    def extract_active_dependencies(self, state: GeneratorStageState) -> Dict[str, List[str]]:
+    def extract_active_dependencies(self, state: GeneratorSwarmState) -> Dict[str, List[str]]:
         """Extract currently active dependencies from state"""
         try:
             active_deps = {}
@@ -177,7 +177,7 @@ class GeneratorStageCheckpointManager:
             )
             return {}
     
-    def build_execution_stack(self, state: GeneratorStageState) -> List[str]:
+    def build_execution_stack(self, state: GeneratorSwarmState) -> List[str]:
         """Build execution stack from current state"""
         try:
             execution_stack = []
@@ -193,7 +193,7 @@ class GeneratorStageCheckpointManager:
             )
             return []
     
-    def identify_pending_operations(self, state: GeneratorStageState) -> Dict[str, List[str]]:
+    def identify_pending_operations(self, state: GeneratorSwarmState) -> Dict[str, List[str]]:
         """Identify pending operations for each agent"""
         try:
             pending_ops = {}
@@ -216,7 +216,7 @@ class GeneratorStageCheckpointManager:
             )
             return {}
     
-    def identify_rollback_points(self, state: GeneratorStageState) -> List[Dict[str, Any]]:
+    def identify_rollback_points(self, state: GeneratorSwarmState) -> List[Dict[str, Any]]:
         """Identify potential rollback points in the execution"""
         try:
             rollback_points = []
@@ -247,7 +247,7 @@ class GeneratorStageCheckpointManager:
             )
             return []
     
-    def calculate_stage_duration(self, state: GeneratorStageState) -> float:
+    def calculate_stage_duration(self, state: GeneratorSwarmState) -> float:
         """Calculate total stage duration"""
         try:
             start_time = state.get("stage_start_time")
@@ -266,7 +266,7 @@ class GeneratorStageCheckpointManager:
             )
             return 0.0
     
-    def calculate_agent_performance(self, state: GeneratorStageState) -> Dict[str, Dict[str, Any]]:
+    def calculate_agent_performance(self, state: GeneratorSwarmState) -> Dict[str, Dict[str, Any]]:
         """Calculate performance metrics for each agent"""
         try:
             performance = {}

@@ -42,7 +42,7 @@ from .types import (
     SecurityState,
     CostState
 )
-from .agents.generator.generator_state import GeneratorStageState
+from .agents.generator.generator_state import GeneratorSwarmState
 from .agents.base_agent import BaseSubgraphAgent
 from aws_orchestrator_agent.utils.logger import AgentLogger, log_sync, log_async
 from aws_orchestrator_agent.config.config import Config
@@ -259,7 +259,7 @@ class CustomSupervisorAgent(BaseAgent):
         """Get description for an agent based on its name."""
         descriptions = {
             "planner_sub_supervisor": "Analyzes requirements and creates execution plans using specialized sub-agents",
-            "generator_swarm": "Generates Terraform modules using coordinated swarm of specialized generator agents",
+            "generator_swarm": "Generates Terraform modules using coordinated swarm of specialized generator agents (subgraph with isolated state)",
             "editor_agent": "Modifies existing Terraform configurations",
             "validation_agent": "Validates Terraform modules and configurations"
         }
@@ -268,7 +268,7 @@ class CustomSupervisorAgent(BaseAgent):
     def _build_supervisor_graph(self) -> StateGraph:
         """Build the supervisor StateGraph using langgraph-supervisor."""
         
-        # Get agent names for handoff tools
+        # Get agent names for handoff tools (keep all agents including generator_swarm)
         agent_names = list(self.agents.keys())
         
         # Create custom handoff tools for all agents
@@ -278,44 +278,118 @@ class CustomSupervisorAgent(BaseAgent):
         # Each agent should be a compiled graph with a name
         agents = []
         for agent_name, agent in self.agents.items():
-            supervisor_logger.log_structured(
-                level="DEBUG",
-                message=f"Compiling agent for supervisor",
-                extra={
-                    "agent_name": agent_name,
-                    "agent_type": type(agent).__name__,
-                    "agent_has_build_graph": hasattr(agent, 'build_graph'),
-                }
-            )
-            
-            supervisor_logger.log_structured(
-                level="DEBUG",
-                message=f"About to compile agent graph",
-                extra={
-                    "agent_name": agent_name,
-                    "agent_type": type(agent).__name__,
-                    "agent_has_build_graph": hasattr(agent, 'build_graph'),
-                    "agent_has_name": hasattr(agent, '_name'),
-                    "agent_name_value": getattr(agent, '_name', 'unknown')
-                }
-            )
-            
-            compiled_agent = agent.build_graph().compile(
-                # checkpointer=self.memory,
-                name=agent_name  # Set the agent name
-            )
-            
-            supervisor_logger.log_structured(
-                level="DEBUG",
-                message=f"Agent compiled successfully",
-                extra={
-                    "agent_name": agent_name,
-                    "compiled_agent_type": type(compiled_agent).__name__,
-                    "compiled_agent_has_nodes": hasattr(compiled_agent, 'nodes'),
-                }
-            )
-            
-            agents.append(compiled_agent)
+            if agent_name == "generator_swarm":
+                # Special handling for generator_swarm - use transformation node wrapper
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Creating generator_swarm transformation node wrapper",
+                    extra={
+                        "agent_name": agent_name,
+                        "agent_type": type(agent).__name__,
+                        "integration_type": "transformation_node_wrapper"
+                    }
+                )
+                
+                # Create transformation node wrapper function
+                async def generator_swarm_transformation_node(supervisor_state: SupervisorState, config: dict = None, **kwargs) -> Dict[str, Any]:
+                    """
+                    Transformation node wrapper that handles state conversion between SupervisorState and GeneratorSwarmState.
+                    This follows the LangGraph pattern for disjoint schemas with explicit state transformation.
+                    
+                    Args:
+                        supervisor_state: SupervisorState from parent graph
+                        config: Optional configuration dict (for langgraph-supervisor compatibility)
+                        **kwargs: Additional keyword arguments (for langgraph-supervisor compatibility)
+                    """
+                    try:
+                        # 1. Pass SupervisorState directly to wrapper (let wrapper handle transformation)
+                        # This ensures tools receive the full GeneratorSwarmState via InjectedState
+                        generator_output = await agent.create_wrapper_function()(supervisor_state)
+                        
+                        return generator_output
+                        
+                    except Exception as e:
+                        supervisor_logger.log_structured(
+                            level="ERROR",
+                            message="Generator swarm transformation node error",
+                            extra={
+                                "error": str(e),
+                                "error_type": type(e).__name__
+                            }
+                        )
+                        raise
+                
+                # Create wrapper object for langgraph-supervisor compatibility
+                class GeneratorSwarmWrapper:
+                    def __init__(self, wrapper_func, name):
+                        self.name = name
+                        self._wrapper_func = wrapper_func
+                    
+                    def __call__(self, *args, **kwargs):
+                        return self._wrapper_func(*args, **kwargs)
+                    
+                    async def __acall__(self, *args, **kwargs):
+                        return await self._wrapper_func(*args, **kwargs)
+                    
+                    async def ainvoke(self, *args, **kwargs):
+                        return await self._wrapper_func(*args, **kwargs)
+                    
+                    def invoke(self, *args, **kwargs):
+                        return self._wrapper_func(*args, **kwargs)
+                
+                # Create the wrapper object
+                generator_swarm_wrapper = GeneratorSwarmWrapper(generator_swarm_transformation_node, "generator_swarm")
+                agents.append(generator_swarm_wrapper)
+                
+                supervisor_logger.log_structured(
+                    level="INFO",
+                    message="Generator_swarm transformation node wrapper created successfully",
+                    extra={
+                        "agent_name": agent_name,
+                        "wrapper_type": type(generator_swarm_wrapper).__name__
+                    }
+                )
+                
+            else:
+                # Regular agent compilation
+                supervisor_logger.log_structured(
+                    level="DEBUG",
+                    message=f"Compiling regular agent for supervisor",
+                    extra={
+                        "agent_name": agent_name,
+                        "agent_type": type(agent).__name__,
+                        "agent_has_build_graph": hasattr(agent, 'build_graph'),
+                    }
+                )
+                
+                supervisor_logger.log_structured(
+                    level="DEBUG",
+                    message=f"About to compile agent graph",
+                    extra={
+                        "agent_name": agent_name,
+                        "agent_type": type(agent).__name__,
+                        "agent_has_build_graph": hasattr(agent, 'build_graph'),
+                        "agent_has_name": hasattr(agent, '_name'),
+                        "agent_name_value": getattr(agent, '_name', 'unknown')
+                    }
+                )
+                
+                compiled_agent = agent.build_graph().compile(
+                    # checkpointer=self.memory,
+                    name=agent_name  # Set the agent name
+                )
+                
+                supervisor_logger.log_structured(
+                    level="DEBUG",
+                    message=f"Agent compiled successfully",
+                    extra={
+                        "agent_name": agent_name,
+                        "compiled_agent_type": type(compiled_agent).__name__,
+                        "compiled_agent_has_nodes": hasattr(compiled_agent, 'nodes'),
+                    }
+                )
+                
+                agents.append(compiled_agent)
         
         # Create pre-model hook for workflow tracking and observability (SECONDARY METHOD)
         def pre_model_hook(state: SupervisorState) -> SupervisorState:
@@ -947,7 +1021,7 @@ The planning workflow is complete and you must proceed to the generation phase."
                             supervisor_updates = generator_agent.output_transform(agent_state)
                         else:
                             # Fallback to StateTransformer
-                            supervisor_updates = StateTransformer.generator_swarm_to_supervisor(GeneratorStageState(**agent_state))
+                            supervisor_updates = StateTransformer.generator_swarm_to_supervisor(GeneratorSwarmState(**agent_state))
                     else:
                         # Regular generation agent
                         supervisor_updates = StateTransformer.generation_to_supervisor(GenerationState(**agent_state))

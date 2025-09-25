@@ -14,7 +14,7 @@ from langgraph.types import Command
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
-from ..generator_state import GeneratorStageState
+from ..generator_state import GeneratorSwarmState
 from .local_generator_prompts import LOCAL_VALUES_AGENT_SYSTEM_PROMPT, LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE
 
 # Create agent logger for local values generator
@@ -214,12 +214,19 @@ class TerraformLocalValueGenerationResponse(BaseModel):
         return v
 
 @tool("generate_terraform_locals")
-async def generate_terraform_locals(
-    state: Annotated[Any, InjectedState]
+def generate_terraform_locals(
+    execution_plan_data: dict = None,
+    agent_workspace: dict = None,
+    planning_context: dict = None
 ) -> TerraformLocalValueGenerationResponse:
     """
     Generate Terraform local values from execution plan specifications and agent requests.
     
+    Args:
+        execution_plan_data: Execution plan data containing local value requirements
+        agent_workspace: Agent workspace data for the local values agent
+        planning_context: Planning context with generation requirements
+               
     This tool analyzes expression needs, generates efficient local values, 
     identifies dependencies, and provides handoff recommendations to other agents. It supports
     both planner specifications and dynamic agent communication.
@@ -228,24 +235,29 @@ async def generate_terraform_locals(
     try:
         start_time = datetime.now()
         
-        # Extract data from state
-        local_value_requirements = state.get('local_value_requirements', [])
-        generation_context = state.get('planning_context', {})
+        # Use provided parameters or defaults
+        execution_plan_data = execution_plan_data or {}
+        agent_workspace = agent_workspace or {}
+        planning_context = planning_context or {}
+        
+        # Extract data from parameters
+        local_value_requirements = execution_plan_data.get('local_value_requirements', [])
+        generation_context = planning_context or {}
         
         local_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform local values generation",
             extra={
                 "local_value_requirements_count": len(local_value_requirements),
-                "generation_id": generator_state.get('generation_id', 'unknown'),
-                "current_stage": generator_state.get('current_stage', 'unknown'),
-                "active_agent": generator_state.get('active_agent', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown'),
+                "current_stage": planning_context.get('current_stage', 'unknown'),
+                "active_agent": agent_workspace.get('active_agent', 'unknown')
             }
         )
         
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
-        workspace = generator_state.get('agent_workspaces', {}).get('local_values_agent', {})
+        workspace = agent_workspace
         
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
@@ -256,14 +268,14 @@ async def generate_terraform_locals(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
-            generation_id=generator_state.get('generation_id', str(uuid.uuid4())),
+            generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
             local_value_requirements=escape_json_for_template(json.dumps(local_value_requirements, indent=2)),
-            current_stage=generator_state.get('current_stage', 'planning'),
-            active_agent=generator_state.get('active_agent', 'local_values_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(generator_state.get('resolved_dependencies', {}), indent=2)),
+            current_stage=planning_context.get('current_stage', 'planning'),
+            active_agent=agent_workspace.get('active_agent', 'local_values_agent'),
+            previous_agent_results=escape_json_for_template(json.dumps(agent_workspace.get('resolved_dependencies', {}), indent=2)),
             generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
             specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(generator_state.get('handoff_context', {}), indent=2)),
+            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2)),
             agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
         )
         
@@ -327,12 +339,12 @@ async def generate_terraform_locals(
             message="Executing LLM chain for local values generation",
             extra={
                 "prompt_length": len(formatted_user_prompt),
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         # Execute the chain
-        llm_response = await chain.ainvoke({})
+        llm_response = chain.invoke({})
         
         local_generator_logger.log_structured(
             level="DEBUG",
@@ -340,14 +352,14 @@ async def generate_terraform_locals(
             extra={
                 "generated_locals_count": len(llm_response.generated_locals),
                 "discovered_dependencies_count": len(llm_response.discovered_dependencies),
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         # Post-process and enhance response
         enhanced_response = post_process_local_values_response(
             llm_response, 
-            state, 
+            agent_workspace, 
             generation_context, 
             start_time
         )
@@ -360,25 +372,25 @@ async def generate_terraform_locals(
                 "final_dependencies_count": len(enhanced_response.discovered_dependencies),
                 "generation_duration_seconds": enhanced_response.generation_metadata.generation_duration_seconds,
                 "completion_status": enhanced_response.completion_status,
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         return enhanced_response
         
     except Exception as e:
-        generator_state = state.get('generator_state', {})
+        generator_state = agent_workspace.get('generator_state', {})
         local_generator_logger.log_structured(
             level="ERROR",
             message="Terraform local values generation failed",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
-                "generation_id": generator_state.get('generation_id', 'unknown'),
-                "current_stage": generator_state.get('current_stage', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown'),
+                "current_stage": planning_context.get('current_stage', 'unknown')
             }
         )
-        return create_local_values_error_response(e, generator_state, datetime.now())
+        return create_local_values_error_response(e, agent_workspace, datetime.now())
 
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
     """Extract specific requirements from context"""
@@ -405,7 +417,7 @@ def extract_specific_requirements(context: Dict[str, Any]) -> str:
 
 def post_process_local_values_response(
     llm_response: TerraformLocalValueGenerationResponse,
-    state: Dict[str, Any], 
+    agent_workspace: Dict[str, Any], 
     context: Dict[str, Any],
     start_time: datetime
 ) -> TerraformLocalValueGenerationResponse:
@@ -458,7 +470,7 @@ def post_process_local_values_response(
     llm_response.state_updates = create_local_value_state_updates(
         validated_locals,
         enhanced_dependencies,
-        state,
+        agent_workspace,
         llm_response.completion_status
     )
     
@@ -876,7 +888,7 @@ def create_local_value_handoff_recommendations(
 def create_local_value_state_updates(
     locals_list: List[TerraformLocalValue],
     dependencies: List[DiscoveredLocalDependency],
-    current_state: Dict[str, Any],
+    agent_workspace: Dict[str, Any],
     completion_status: str
 ) -> Dict[str, Any]:
     """Create comprehensive state updates for the swarm"""
@@ -884,15 +896,15 @@ def create_local_value_state_updates(
     updates = {
         'terraform_locals': [local.dict() for local in locals_list],
         'pending_dependencies': {
-            **current_state.get('pending_dependencies', {}),
+            **agent_workspace.get('pending_dependencies', {}),
             'local_values_agent': [dep.dict() for dep in dependencies]
         },
         'agent_status_matrix': {
-            **current_state.get('agent_status_matrix', {}),
+            **agent_workspace.get('agent_status_matrix', {}),
             'local_values_agent': completion_status
         },
         'planning_progress': {
-            **current_state.get('planning_progress', {}),
+            **agent_workspace.get('planning_progress', {}),
             'local_values_agent': 1.0 if completion_status == 'completed' else 0.6
         }
     }
@@ -946,7 +958,7 @@ def create_local_value_checkpoint_data(
 
 def create_local_values_error_response(
     error: Exception, 
-    state: Dict[str, Any], 
+    agent_workspace: Dict[str, Any], 
     start_time: datetime
 ) -> TerraformLocalValueGenerationResponse:
     """Create error response when tool execution fails"""
@@ -969,7 +981,7 @@ def create_local_values_error_response(
         complete_locals_block="",
         state_updates={
             'agent_status_matrix': {
-                **state.get('agent_status_matrix', {}),
+                **agent_workspace.get('agent_status_matrix', {}),
                 'local_values_agent': 'error'
             }
         },

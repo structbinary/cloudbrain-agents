@@ -35,13 +35,18 @@ class DependencyType(Enum):
     OUTPUT_TO_VARIABLE = "output_to_variable"
     OUTPUT_TO_LOCAL_VALUES = "output_to_local_values"
 
-class GeneratorStageState(TypedDict):
-    """Extended state specific to Planning Stage coordination"""
+class GeneratorSwarmState(TypedDict):
+    """
+    Isolated state schema for Generator Swarm subgraph.
+    
+    This schema has NO shared fields with SupervisorState to prevent state contamination.
+    All communication with the supervisor happens through state transformation functions.
+    """
     active_agent: str
     
     # Message handling for LangGraph (fixed TypedDict format)
     llm_input_messages: Annotated[List[AnyMessage], add_messages]
-    messages: Annotated[List[AnyMessage], add_messages]
+    messages: Annotated[List[AnyMessage], add_messages]  # Renamed from 'messages'
     
     # Planning Stage Management
     stage_status: str = "planning_active"  # planning_active, planning_complete, planning_error
@@ -141,3 +146,4 @@ class GeneratorStageState(TypedDict):
     planning_context: Optional[Dict[str, Any]] = None  # Additional planning context from input_transform
     stage_progress: Optional[Dict[str, float]] = None  # Stage-level progress tracking
     current_stage: Optional[str] = None  # Current stage identifier
+    remaining_steps: Optional[List[str]] = None  # Remaining steps to complete

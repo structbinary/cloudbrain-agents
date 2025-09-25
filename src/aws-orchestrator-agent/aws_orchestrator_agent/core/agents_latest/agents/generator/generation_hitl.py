@@ -3,7 +3,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from langgraph.prebuilt import InjectedState
 from langchain_core.tools import InjectedToolCallId
-from .generator_state import GeneratorStageState, GeneratorAgentStatus
+from .generator_state import GeneratorSwarmState, GeneratorAgentStatus
 from .generator_state_controller import GeneratorStageController
 from aws_orchestrator_agent.utils.logger import AgentLogger
 import datetime
@@ -25,7 +25,7 @@ class GeneratorStageHumanLoop:
         
         @tool(f"request_approval_{trigger_condition}")
         def approval_checkpoint_tool(
-            state: Annotated[GeneratorStageState, InjectedState],
+            state: Annotated[GeneratorSwarmState, InjectedState],
             tool_call_id: Annotated[str, InjectedToolCallId],
             approval_context: Annotated[Dict[str, Any], "Context requiring approval"],
             urgency_level: Annotated[int, "Urgency: 1=low, 5=critical"] = 3,
@@ -109,7 +109,7 @@ class GeneratorStageHumanLoop:
     def create_human_approval_handler(self):
         """Create human approval handler node"""
         
-        def human_approval_handler(state: GeneratorStageState) -> Command:
+        def human_approval_handler(state: GeneratorSwarmState) -> Command:
             """Handle human approval workflow"""
             try:
                 approval_context = state.get("approval_context", {})
@@ -200,7 +200,7 @@ class GeneratorStageHumanLoop:
             approval_id: Annotated[str, "ID of approval request"],
             decision: Annotated[str, "approved/rejected/modified"],
             feedback: Annotated[str, "Human feedback or modifications"],
-            state: Annotated[GeneratorStageState, InjectedState]
+            state: Annotated[GeneratorSwarmState, InjectedState]
         ) -> Command:
             """Process human approval response and update state accordingly."""
             try:
@@ -373,7 +373,7 @@ class GeneratorStageHumanLoop:
             )
             return False
     
-    def handle_approval_timeout(self, state: GeneratorStageState, approval_context: Dict[str, Any]) -> Command:
+    def handle_approval_timeout(self, state: GeneratorSwarmState, approval_context: Dict[str, Any]) -> Command:
         """Handle approval timeout scenarios"""
         try:
             self.logger.log_structured(
@@ -425,7 +425,7 @@ class GeneratorStageHumanLoop:
                 graph=Command.PARENT
             )
     
-    def handle_approval_rejection(self, state: GeneratorStageState, processed_request: Dict[str, Any]) -> Command:
+    def handle_approval_rejection(self, state: GeneratorSwarmState, processed_request: Dict[str, Any]) -> Command:
         """Handle approval rejection scenarios"""
         try:
             self.logger.log_structured(
@@ -473,7 +473,7 @@ class GeneratorStageHumanLoop:
                 graph=Command.PARENT
             )
     
-    def handle_approval_modification(self, state: GeneratorStageState, processed_request: Dict[str, Any], feedback: str) -> Command:
+    def handle_approval_modification(self, state: GeneratorSwarmState, processed_request: Dict[str, Any], feedback: str) -> Command:
         """Handle approval modification scenarios"""
         try:
             self.logger.log_structured(

@@ -14,7 +14,7 @@ from langgraph.types import Command
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
-from ..generator_state import GeneratorStageState
+from ..generator_state import GeneratorSwarmState
 from .data_generator_prompts import DATA_SOURCE_AGENT_SYSTEM_PROMPT, DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE
 
 # Create agent logger for data source generator
@@ -221,12 +221,19 @@ class TerraformDataSourceGenerationResponse(BaseModel):
         return v
 
 @tool("generate_terraform_data_sources")
-async def generate_terraform_data_sources(
-    state: Annotated[Any, InjectedState]
+def generate_terraform_data_sources(
+    execution_plan_data: dict = None,
+    agent_workspace: dict = None,
+    planning_context: dict = None
 ) -> TerraformDataSourceGenerationResponse:
     """
     Generate Terraform AWS data source blocks from execution plan specifications and agent requests.
     
+    Args:
+        execution_plan_data: Execution plan data containing data source requirements
+        agent_workspace: Agent workspace data for the data source agent
+        planning_context: Planning context with generation requirements
+
     This tool analyzes external infrastructure reference needs, generates HCL blocks, 
     identifies dependencies, and provides handoff recommendations to other agents. It supports
     both planner specifications and dynamic agent communication.
@@ -235,24 +242,29 @@ async def generate_terraform_data_sources(
     try:
         start_time = datetime.now()
         
-        # Extract data from state
-        data_source_requirements = state.get('data_source_requirements', [])
-        generation_context = state.get('planning_context', {})
+        # Use provided parameters or defaults
+        execution_plan_data = execution_plan_data or {}
+        agent_workspace = agent_workspace or {}
+        planning_context = planning_context or {}
+        
+        # Extract data from parameters
+        data_source_requirements = execution_plan_data.get('data_source_requirements', [])
+        generation_context = planning_context or {}
         
         data_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform data source generation",
             extra={
                 "data_source_requirements_count": len(data_source_requirements),
-                "generation_id": generator_state.get('generation_id', 'unknown'),
-                "current_stage": generator_state.get('current_stage', 'unknown'),
-                "active_agent": generator_state.get('active_agent', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown'),
+                "current_stage": planning_context.get('current_stage', 'unknown'),
+                "active_agent": agent_workspace.get('active_agent', 'unknown')
             }
         )
         
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
-        workspace = generator_state.get('agent_workspaces', {}).get('data_source_agent', {})
+        workspace = agent_workspace
         
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
@@ -263,14 +275,14 @@ async def generate_terraform_data_sources(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
-            generation_id=generator_state.get('generation_id', str(uuid.uuid4())),
+            generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
             data_source_requirements=escape_json_for_template(json.dumps(data_source_requirements, indent=2)),
-            current_stage=generator_state.get('current_stage', 'planning'),
-            active_agent=generator_state.get('active_agent', 'data_source_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(generator_state.get('resolved_dependencies', {}), indent=2)),
+            current_stage=planning_context.get('current_stage', 'planning'),
+            active_agent=agent_workspace.get('active_agent', 'data_source_agent'),
+            previous_agent_results=escape_json_for_template(json.dumps(agent_workspace.get('resolved_dependencies', {}), indent=2)),
             generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
             specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(generator_state.get('handoff_context', {}), indent=2)),
+            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2)),
             agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
         )
         
@@ -334,12 +346,12 @@ async def generate_terraform_data_sources(
             message="Executing LLM chain for data source generation",
             extra={
                 "prompt_length": len(formatted_user_prompt),
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         # Execute the chain
-        llm_response = await chain.ainvoke({})
+        llm_response = chain.invoke({})
         
         data_generator_logger.log_structured(
             level="DEBUG",
@@ -347,14 +359,14 @@ async def generate_terraform_data_sources(
             extra={
                 "generated_data_sources_count": len(llm_response.generated_data_sources),
                 "discovered_dependencies_count": len(llm_response.discovered_dependencies),
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         # Post-process and enhance response
         enhanced_response = post_process_data_source_response(
             llm_response, 
-            state, 
+            agent_workspace, 
             generation_context, 
             start_time
         )
@@ -367,25 +379,25 @@ async def generate_terraform_data_sources(
                 "final_dependencies_count": len(enhanced_response.discovered_dependencies),
                 "generation_duration_seconds": enhanced_response.generation_metadata.generation_duration_seconds,
                 "completion_status": enhanced_response.completion_status,
-                "generation_id": generator_state.get('generation_id', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
         
         return enhanced_response
         
     except Exception as e:
-        generator_state = state.get('generator_state', {})
+        generator_state = agent_workspace.get('generator_state', {})
         data_generator_logger.log_structured(
             level="ERROR",
             message="Terraform data source generation failed",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
-                "generation_id": generator_state.get('generation_id', 'unknown'),
-                "current_stage": generator_state.get('current_stage', 'unknown')
+                "generation_id": agent_workspace.get('generation_id', 'unknown'),
+                "current_stage": planning_context.get('current_stage', 'unknown')
             }
         )
-        return create_data_source_error_response(e, generator_state, datetime.now())
+        return create_data_source_error_response(e, agent_workspace, datetime.now())
 
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
     """Extract specific requirements from context"""
@@ -409,7 +421,7 @@ def extract_specific_requirements(context: Dict[str, Any]) -> str:
 
 def post_process_data_source_response(
     llm_response: TerraformDataSourceGenerationResponse,
-    state: Dict[str, Any], 
+    agent_workspace: Dict[str, Any], 
     context: Dict[str, Any],
     start_time: datetime
 ) -> TerraformDataSourceGenerationResponse:
@@ -459,7 +471,7 @@ def post_process_data_source_response(
     llm_response.state_updates = create_data_source_state_updates(
         validated_data_sources,
         enhanced_dependencies,
-        state,
+        agent_workspace,
         llm_response.completion_status
     )
     
@@ -831,7 +843,7 @@ def create_data_source_handoff_recommendations(
 def create_data_source_state_updates(
     data_sources: List[TerraformDataSourceBlock],
     dependencies: List[DiscoveredDataDependency],
-    current_state: Dict[str, Any],
+    agent_workspace: Dict[str, Any],
     completion_status: str
 ) -> Dict[str, Any]:
     """Create comprehensive state updates for the swarm"""
@@ -839,15 +851,15 @@ def create_data_source_state_updates(
     updates = {
         'terraform_data_sources': [ds.dict() for ds in data_sources],
         'pending_dependencies': {
-            **current_state.get('pending_dependencies', {}),
+            **agent_workspace.get('pending_dependencies', {}),
             'data_source_agent': [dep.dict() for dep in dependencies]
         },
         'agent_status_matrix': {
-            **current_state.get('agent_status_matrix', {}),
+            **agent_workspace.get('agent_status_matrix', {}),
             'data_source_agent': completion_status
         },
         'planning_progress': {
-            **current_state.get('planning_progress', {}),
+            **agent_workspace.get('planning_progress', {}),
             'data_source_agent': 1.0 if completion_status == 'completed' else 0.6
         }
     }
@@ -899,7 +911,7 @@ def create_data_source_checkpoint_data(
 
 def create_data_source_error_response(
     error: Exception, 
-    state: Dict[str, Any], 
+    agent_workspace: Dict[str, Any], 
     start_time: datetime
 ) -> TerraformDataSourceGenerationResponse:
     """Create error response when tool execution fails"""
@@ -921,7 +933,7 @@ def create_data_source_error_response(
         ),
         state_updates={
             'agent_status_matrix': {
-                **state.get('agent_status_matrix', {}),
+                **agent_workspace.get('agent_status_matrix', {}),
                 'data_source_agent': 'error'
             }
         },

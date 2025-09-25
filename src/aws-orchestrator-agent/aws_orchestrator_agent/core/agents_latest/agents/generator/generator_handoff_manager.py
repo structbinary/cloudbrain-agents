@@ -4,7 +4,7 @@ from langgraph.types import Command
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt import InjectedState
 from langchain_core.tools import InjectedToolCallId, tool
-from .generator_state import GeneratorStageState, DependencyType, GeneratorAgentStatus
+from .generator_state import GeneratorSwarmState, DependencyType, GeneratorAgentStatus
 from .generator_state_controller import GeneratorStageController
 from aws_orchestrator_agent.utils.logger import AgentLogger
 import datetime
@@ -161,7 +161,7 @@ class GeneratorStageHandoffManager:
     
     def create_target_agent_context(
         self, 
-        state: GeneratorStageState, 
+        state: GeneratorSwarmState, 
         dependency_request: Dict[str, Any], 
         target_agent: str
     ) -> Dict[str, Any]:
@@ -220,7 +220,7 @@ def create_completion_handoff_tool(source_agent: str):
         completion_data: Annotated[Dict[str, Any], "Generated artifacts and results"],
         resolved_dependencies: Annotated[List[str], "List of dependency IDs resolved"],
         next_recommendations: Annotated[List[str], "Recommended next agents to activate"],
-        state: Annotated[GeneratorStageState, InjectedState],
+        state: Annotated[GeneratorSwarmState, InjectedState],
         tool_call_id: Annotated[str, InjectedToolCallId]
     ) -> Command:
         try:
