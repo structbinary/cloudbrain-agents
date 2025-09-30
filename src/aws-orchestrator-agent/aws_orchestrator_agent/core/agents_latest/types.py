@@ -689,68 +689,11 @@ class StateTransformer:
             resolved_dependencies={},
             dependency_graph={},
             agent_workspaces={
-                "resource_configuration_agent": {
-                    "generated_resources": [],
-                    "pending_variable_requests": [],
-                    "pending_data_source_requests": [],
-                    "completion_checklist": [],
-                    # Add planner input data from actual structure
-                    "planner_input": resource_configurations,
-                    "module_structure": execution_data.get("module_structure_plan", {}),
-                    "optimization_data": execution_data.get("configuration_optimizer_data", {}),
-                    "terraform_files": primary_execution_plan.get("terraform_files", []),
-                    # Additional detailed context from input_transform
-                    "dependencies": dependencies,  # resource_dependencies from execution plan
-                    "security_context": security_considerations,  # security_considerations from execution plan
-                    "cost_context": cost_estimates  # estimated_costs from execution plan
-                },
-                "variable_definition_agent": {
-                    "generated_variables": [],
-                    "variable_validation_rules": [],
-                    "source_requests": [],
-                    "completion_checklist": [],
-                    # Add planner input data from actual structure
-                    "planner_input": variable_definitions,
-                    "validation_context": {
-                        "validation_rules": [var.get("validation_rules", []) for var in variable_definitions],
-                        "default_values": {var.get("name"): var.get("default") for var in variable_definitions if var.get("default") is not None},
-                        "sensitive_variables": [var.get("name") for var in variable_definitions if var.get("sensitive", False)]
-                    },
-                    # Additional detailed context from input_transform
-                    "resource_dependencies": dependencies  # resource_dependencies from execution plan
-                },
-                "data_source_agent": {
-                    "generated_data_sources": [],
-                    "external_dependencies": data_sources,  # data_sources from execution plan
-                    "completion_checklist": [],
-                    # Add planner input data from actual structure
-                    "planner_input": data_sources,
-                    # Additional detailed context from input_transform
-                    "resource_dependencies": dependencies  # resource_dependencies from execution plan
-                },
-                "local_values_agent": {
-                    "generated_locals": [],
-                    "computed_expressions": local_values,  # local_values from execution plan
-                    "completion_checklist": [],
-                    # Add planner input data from actual structure
-                    "planner_input": local_values,
-                    # Additional detailed context from input_transform
-                    "computed_dependencies": dependencies  # resource_dependencies from execution plan
-                },
-                "output_definition_agent": {
-                    "generated_outputs": [],
-                    "output_validation_rules": [],
-                    "source_requests": [],
-                    "completion_checklist": [],
-                    # Add planner input data from actual structure
-                    "planner_input": output_definitions,
-                    "output_context": {
-                        "dependencies": [output.get("depends_on", []) for output in output_definitions],
-                        "preconditions": [output.get("precondition") for output in output_definitions if output.get("precondition")]
-                    },
-                    # Additional detailed context from input_transform
-                    "resource_dependencies": dependencies  # resource_dependencies from execution plan
-                }
+                "resource_configuration_agent": {},
+                "variable_definition_agent": {},
+                "data_source_agent": {},
+                "local_values_agent": {},
+                "output_definition_agent": {}
             },
             session_id=session_id,
             task_id=task_id,

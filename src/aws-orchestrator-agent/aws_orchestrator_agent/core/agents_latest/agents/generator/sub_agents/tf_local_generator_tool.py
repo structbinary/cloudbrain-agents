@@ -64,6 +64,13 @@ class LocalValueComplexity(str, Enum):
     COMPLEX = "complex"         # Multiple functions, complex conditionals
     ADVANCED = "advanced"       # Nested expressions, complex for loops
 
+class GeneratorAgentName(str, Enum):
+    RESOURCE_CONFIGURATION = "resource_configuration_agent"
+    VARIABLE_DEFINITION = "variable_definition_agent"
+    DATA_SOURCE = "data_source_agent"
+    LOCAL_VALUES = "local_values_agent"
+    OUTPUT_DEFINITION = "output_definition_agent"
+
 class TerraformLocalValue(BaseModel):
     """Individual Terraform local value specification"""
     
@@ -110,7 +117,7 @@ class DiscoveredLocalDependency(BaseModel):
     
     dependency_id: str = Field(..., description="Unique dependency identifier")
     dependency_type: str = Field(..., description="Type of dependency discovered")
-    target_agent: str = Field(..., description="Agent that should handle this dependency")
+    target_agent: GeneratorAgentName = Field(..., description="Agent that should handle this dependency")
     
     # Context for handoff
     source_local: str = Field(..., description="Local value that triggered this dependency")
@@ -159,7 +166,7 @@ class LocalValueGenerationMetrics(BaseModel):
 class LocalValueHandoffRecommendation(BaseModel):
     """Recommendation for agent handoff with local value context"""
     
-    target_agent: str = Field(..., description="Recommended target agent")
+    target_agent: GeneratorAgentName = Field(..., description="Recommended target agent")
     handoff_reason: str = Field(..., description="Reason for handoff")
     handoff_priority: int = Field(default=3, ge=1, le=5)
     
@@ -191,8 +198,8 @@ class TerraformLocalValueGenerationResponse(BaseModel):
     generation_metadata: LocalValueGenerationMetrics = Field(..., description="Generation performance metrics")
     generation_timestamp: datetime = Field(default_factory=datetime.now)
     
-    # Complete locals block
-    complete_locals_block: str = Field(..., description="Complete HCL locals block with all generated values")
+    # # Complete locals block
+    # complete_locals_block: str = Field(..., description="Complete HCL locals block with all generated values")
     
     # State updates
     state_updates: Dict[str, Any] = Field(default_factory=dict, description="Updates to apply to swarm state")

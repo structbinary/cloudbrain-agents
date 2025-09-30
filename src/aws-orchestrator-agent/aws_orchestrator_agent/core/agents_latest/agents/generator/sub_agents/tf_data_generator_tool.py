@@ -20,6 +20,12 @@ from .data_generator_prompts import DATA_SOURCE_AGENT_SYSTEM_PROMPT, DATA_SOURCE
 # Create agent logger for data source generator
 data_generator_logger = AgentLogger("DATA_GENERATOR")
 
+class GeneratorAgentName(str, Enum):
+    RESOURCE_CONFIGURATION = "resource_configuration_agent"
+    VARIABLE_DEFINITION = "variable_definition_agent"
+    DATA_SOURCE = "data_source_agent"
+    LOCAL_VALUES = "local_values_agent"
+    OUTPUT_DEFINITION = "output_definition_agent"
 
 class DataSourceType(str, Enum):
     """AWS data source types supported - extensible for dynamic discovery"""
@@ -132,7 +138,7 @@ class DiscoveredDataDependency(BaseModel):
     
     dependency_id: str = Field(..., description="Unique dependency identifier")
     dependency_type: str = Field(..., description="Type of dependency discovered")
-    target_agent: str = Field(..., description="Agent that should handle this dependency")
+    target_agent: GeneratorAgentName = Field(..., description="Agent that should handle this dependency")
     
     # Context for handoff
     source_data_source: str = Field(..., description="Data source that triggered this dependency")
@@ -170,7 +176,7 @@ class DataSourceGenerationMetrics(BaseModel):
 class DataSourceHandoffRecommendation(BaseModel):
     """Recommendation for agent handoff with data source context"""
     
-    target_agent: str = Field(..., description="Recommended target agent")
+    target_agent: GeneratorAgentName = Field(..., description="Recommended target agent")
     handoff_reason: str = Field(..., description="Reason for handoff")
     handoff_priority: int = Field(default=3, ge=1, le=5)
     

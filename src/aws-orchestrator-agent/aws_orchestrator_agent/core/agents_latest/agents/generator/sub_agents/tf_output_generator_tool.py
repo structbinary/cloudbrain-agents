@@ -69,6 +69,14 @@ class OutputUsageContext(str, Enum):
     DEBUGGING_INFO = "debugging_info"             # For troubleshooting
     CONFIGURATION_REFERENCE = "configuration_reference"  # For configuration
 
+class GeneratorAgentName(str, Enum):
+    RESOURCE_CONFIGURATION = "resource_configuration_agent"
+    VARIABLE_DEFINITION = "variable_definition_agent"
+    DATA_SOURCE = "data_source_agent"
+    LOCAL_VALUES = "local_values_agent"
+    OUTPUT_DEFINITION = "output_definition_agent"
+
+
 class TerraformPrecondition(BaseModel):
     """Individual precondition for an output"""
     
@@ -137,7 +145,7 @@ class DiscoveredOutputDependency(BaseModel):
     
     dependency_id: str = Field(..., description="Unique dependency identifier")
     dependency_type: str = Field(..., description="Type of dependency discovered")
-    target_agent: str = Field(..., description="Agent that should handle this dependency")
+    target_agent: GeneratorAgentName = Field(..., description="Agent that should handle this dependency")
     
     # Context for handoff
     source_output: str = Field(..., description="Output that triggered this dependency")
@@ -193,7 +201,7 @@ class OutputGenerationMetrics(BaseModel):
 class OutputHandoffRecommendation(BaseModel):
     """Recommendation for agent handoff with output context"""
     
-    target_agent: str = Field(..., description="Recommended target agent")
+    target_agent: GeneratorAgentName = Field(..., description="Recommended target agent")
     handoff_reason: str = Field(..., description="Reason for handoff")
     handoff_priority: int = Field(default=3, ge=1, le=5)
     
@@ -225,8 +233,8 @@ class TerraformOutputGenerationResponse(BaseModel):
     generation_metadata: OutputGenerationMetrics = Field(..., description="Generation performance metrics")
     generation_timestamp: datetime = Field(default_factory=datetime.now)
     
-    # Complete outputs file
-    complete_outputs_file: str = Field(..., description="Complete outputs.tf file content")
+    # # Complete outputs file
+    # complete_outputs_file: str = Field(..., description="Complete outputs.tf file content")
     
     # State updates
     state_updates: Dict[str, Any] = Field(default_factory=dict, description="Updates to apply to swarm state")

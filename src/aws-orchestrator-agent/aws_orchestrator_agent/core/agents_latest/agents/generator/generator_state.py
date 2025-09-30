@@ -68,67 +68,18 @@ class GeneratorSwarmState(TypedDict):
     
     # Agent Workspaces (Isolated but Coordinated)
     agent_workspaces: Dict[str, Dict[str, Any]] = {
-        "resource_configuration_agent": {
-            "generated_resources": [],
-            "pending_variable_requests": [],
-            "pending_data_source_requests": [],
-            "completion_checklist": [],
-            # Planner input data from execution plan
-            "planner_input": [],  # resource_configurations from execution_plan_data
-            "module_structure": {},  # module_structure_plan from execution_data
-            "optimization_data": {},  # configuration_optimizer_data from execution_data
-            # Additional context fields from StateTransformer
-            "terraform_files": [],  # terraform_files from execution plan
-            "dependencies": [],  # resource_dependencies from execution plan
-            "security_context": [],  # security_considerations from execution plan
-            "cost_context": {}  # estimated_costs from execution plan
-        },
-        "variable_definition_agent": {
-            "generated_variables": [],
-            "variable_validation_rules": [],
-            "source_requests": [],  # requests from other agents
-            "completion_checklist": [],
-            # Planner input data from execution plan
-            "planner_input": [],  # variable_definitions from execution_plan_data
-            "validation_context": {},  # validation rules and default values
-            # Additional context fields from StateTransformer
-            "resource_dependencies": []  # resource_dependencies from execution plan
-        },
-        "data_source_agent": {
-            "generated_data_sources": [],
-            "external_dependencies": [],
-            "completion_checklist": [],
-            # Planner input data from execution plan
-            "planner_input": [],  # data_sources from execution_plan_data
-            # Additional context fields from StateTransformer
-            "resource_dependencies": []  # resource_dependencies from execution plan
-        },
-        "local_values_agent": {
-            "generated_locals": [],
-            "computed_expressions": [],
-            "completion_checklist": [],
-            # Planner input data from execution plan
-            "planner_input": [],  # local_values from execution_plan_data
-            # Additional context fields from StateTransformer
-            "computed_dependencies": []  # resource_dependencies from execution plan
-        },
-        "output_definition_agent": {
-            "generated_outputs": [],
-            "output_validation_rules": [],
-            "source_requests": [],
-            "completion_checklist": [],
-            # Planner input data from execution plan
-            "planner_input": [],  # output_definitions from execution_plan_data
-            "output_context": {},  # dependencies and preconditions
-            # Additional context fields from StateTransformer
-            "resource_dependencies": []  # resource_dependencies from execution plan
-        }
+        "resource_configuration_agent": {},
+        "variable_definition_agent": {},
+        "data_source_agent": {},
+        "local_values_agent": {},
+        "output_definition_agent": {}
     }
     execution_plan_data: Optional[Dict[str, Any]] = None
     state_management_plan_data: Optional[Dict[str, Any]] = None
     configuration_optimizer_plan_data: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
     task_id: Optional[str] = None
+    generation_context: Optional[Dict[str, Any]] = None
     # Handoff Context and Communication Log
     handoff_queue: List[Dict[str, Any]] = []  # pending handoffs
     communication_log: List[Dict[str, Any]] = []  # complete handoff history

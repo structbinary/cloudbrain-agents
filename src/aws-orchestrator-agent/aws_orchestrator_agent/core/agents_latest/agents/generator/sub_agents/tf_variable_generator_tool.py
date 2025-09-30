@@ -17,6 +17,7 @@ from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
 from .variable_generator_prompts import VARIABLE_DEFINITION_AGENT_SYSTEM_PROMPT, VARIABLE_DEFINITION_AGENT_USER_PROMPT_TEMPLATE
+from ..global_state import get_current_state, set_current_state
 
 # Create agent logger for variable generator
 variable_generator_logger = AgentLogger("VARIABLE_GENERATOR")
@@ -73,6 +74,13 @@ class VariableSensitivity(str, Enum):
     INTERNAL = "internal"       # Internal configuration data
     CONFIDENTIAL = "confidential"   # Passwords, keys without encryption
     SECRET = "secret"           # Highly sensitive encrypted data
+
+class GeneratorAgentName(str, Enum):
+    RESOURCE_CONFIGURATION = "resource_configuration_agent"
+    VARIABLE_DEFINITION = "variable_definition_agent"
+    DATA_SOURCE = "data_source_agent"
+    LOCAL_VALUES = "local_values_agent"
+    OUTPUT_DEFINITION = "output_definition_agent"
 
 class TerraformValidationRule(BaseModel):
     """Individual validation rule for a variable"""
@@ -143,7 +151,7 @@ class DiscoveredVariableDependency(BaseModel):
     
     dependency_id: str = Field(..., description="Unique dependency identifier")
     dependency_type: str = Field(..., description="Type of dependency discovered")
-    target_agent: str = Field(..., description="Agent that should handle this dependency")
+    target_agent: GeneratorAgentName = Field(..., description="Agent that should handle this dependency")
     
     # Context for handoff
     source_variable: str = Field(..., description="Variable that triggered this dependency")
@@ -192,7 +200,7 @@ class VariableGenerationMetrics(BaseModel):
 class VariableHandoffRecommendation(BaseModel):
     """Recommendation for agent handoff with variable context"""
     
-    target_agent: str = Field(..., description="Recommended target agent")
+    target_agent: GeneratorAgentName = Field(..., description="Recommended target agent")
     handoff_reason: str = Field(..., description="Reason for handoff")
     handoff_priority: int = Field(default=3, ge=1, le=5)
     
@@ -248,30 +256,43 @@ class TerraformVariableGenerationResponse(BaseModel):
 
 @tool("generate_terraform_variables")
 def generate_terraform_variables(
-    execution_plan_data: dict = None,
-    agent_workspace: dict = None,
-    planning_context: dict = None
+    state: Annotated[Any, InjectedState] = None,
 ) -> TerraformVariableGenerationResponse:
     """
     Generate Terraform input variables from execution plan specifications and agent requests.
     
     Args:
-        execution_plan_data: Execution plan data containing variable definitions
-        agent_workspace: Agent workspace data for the variable definition agent
-        planning_context: Planning context with generation requirements
+        state: GeneratorSwarmState containing all the data (execution_plan_data, agent_workspaces, planning_context)
                
     This tool analyzes parameterization needs, generates variables with proper types and validation,
     identifies dependencies, and provides handoff recommendations to other agents. It supports
     both planner specifications and dynamic agent communication.
     """
-    
+    previous_state = get_current_state()
+    if isinstance(previous_state, str):
+        try:
+            previous_state = json.loads(previous_state)
+        except json.JSONDecodeError as e:
+            previous_state = {}
+            variable_generator_logger.log_structured(
+                level="ERROR",
+                message="Failed to parse previous state JSON",
+                extra={"error": str(e)})
+
     try:
+        if state and state.get("execution_plan_data") and state.get("agent_workspaces") and state.get("planning_context"):
+            # Use injected state
+            execution_plan_data = state.get("execution_plan_data", {})
+            agent_workspace = state.get("agent_workspaces", {}).get("variable_definition_agent", {})
+            planning_context = state.get("planning_context", {})
+        else:
+            # Fallback to global state (previous_state)
+            execution_plan_data = previous_state.get("execution_plan_data", {})
+            agent_workspace = previous_state.get("agent_workspaces", {}).get("variable_definition_agent", {})
+            planning_context = previous_state.get("planning_context", {})
+
         start_time = datetime.now()
         
-        # Use provided parameters or defaults
-        execution_plan_data = execution_plan_data or {}
-        agent_workspace = agent_workspace or {}
-        planning_context = planning_context or {}
         
         # Extract data from parameters
         variable_requirements = execution_plan_data.get('variable_definitions', []) or []

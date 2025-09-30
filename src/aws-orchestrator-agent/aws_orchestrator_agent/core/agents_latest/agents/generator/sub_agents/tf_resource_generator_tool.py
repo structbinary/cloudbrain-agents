@@ -17,7 +17,7 @@ from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
 from .resource_generator_prompts import RESOURCE_CONFIGURATION_USER_PROMPT_TEMPLATE, RESOURCE_CONFIGURATION_SYSTEM_PROMPT
-
+from ..global_state import get_current_state, update_agent_workspace
 # Create agent logger for resource generator
 resource_generator_logger = AgentLogger("RESOURCE_GENERATOR")
 
@@ -27,6 +27,13 @@ class DependencyType(str, Enum):
     DATA_SOURCE_REQUIRED = "data_source_required"
     LOCAL_VALUE_REQUIRED = "local_value_required"
     RESOURCE_DEPENDENCY = "resource_dependency"
+
+class GeneratorAgentName(str, Enum):
+    RESOURCE_CONFIGURATION = "resource_configuration_agent"
+    VARIABLE_DEFINITION = "variable_definition_agent"
+    DATA_SOURCE = "data_source_agent"
+    LOCAL_VALUES = "local_values_agent"
+    OUTPUT_DEFINITION = "output_definition_agent"
 
 class ResourceBlockType(str, Enum):
     """AWS resource types supported - extensible for dynamic discovery"""
@@ -112,7 +119,7 @@ class DiscoveredDependency(BaseModel):
     
     dependency_id: str = Field(..., description="Unique dependency identifier")
     dependency_type: DependencyType = Field(..., description="Type of dependency discovered")
-    target_agent: str = Field(..., description="Agent that should handle this dependency")
+    target_agent: GeneratorAgentName = Field(..., description="Agent that should handle this dependency")
     
     # Context for handoff
     source_resource: str = Field(..., description="Resource that triggered this dependency")
@@ -143,10 +150,11 @@ class ResourceGenerationMetrics(BaseModel):
     validation_errors: List[str] = Field(default_factory=list)
     warning_messages: List[str] = Field(default_factory=list)
 
+
 class HandoffRecommendation(BaseModel):
     """Recommendation for agent handoff with specific context"""
     
-    target_agent: str = Field(..., description="Recommended target agent")
+    target_agent: GeneratorAgentName = Field(..., description="Recommended target agent")
     handoff_reason: str = Field(..., description="Reason for handoff")
     handoff_priority: int = Field(default=3, ge=1, le=5)
     
@@ -209,20 +217,20 @@ class TerraformResourceGenerationResponse(BaseModel):
 
 @tool("generate_terraform_resources")
 def generate_terraform_resources(
-    previous_state: str,
     state: Annotated[Any, InjectedState] = None,
 ) -> TerraformResourceGenerationResponse:
     """
     Generate Terraform AWS resource blocks from execution plan specifications and agent requests.
     
     Args:
-        previous_state: Previous state of the graph
         state: GeneratorSwarmState containing all the data (execution_plan_data, agent_workspaces, planning_context)
     
     This function analyzes resource requirements, generates HCL blocks, identifies dependencies,
     and provides handoff recommendations to other agents in the planning stage. It supports
     both planner specifications and dynamic agent communication.
     """
+    previous_state = get_current_state()
+
     if isinstance(previous_state, str):
         try:
             previous_state = json.loads(previous_state)
@@ -234,12 +242,14 @@ def generate_terraform_resources(
                 extra={"error": str(e)})
     
     try:
-        # Extract data from injected state
-        if state:
+        # Try to get data from injected state first, then fallback to global state
+        if state and state.get("execution_plan_data") and state.get("agent_workspaces") and state.get("planning_context"):
+            # Use injected state
             execution_plan_data = state.get("execution_plan_data", {})
             agent_workspace = state.get("agent_workspaces", {}).get("resource_configuration_agent", {})
             planning_context = state.get("planning_context", {})
         else:
+            # Fallback to global state (previous_state)
             execution_plan_data = previous_state.get("execution_plan_data", {})
             agent_workspace = previous_state.get("agent_workspaces", {}).get("resource_configuration_agent", {})
             planning_context = previous_state.get("planning_context", {})
@@ -275,15 +285,15 @@ def generate_terraform_resources(
         )
         
         # Pre-approval checks for high-risk resources
-        approval_results = []
-        for resource_spec in resource_specifications:
-            approval_context = _prepare_approval_context(resource_spec, generation_context)
-            approval_result = _check_resource_approval(approval_context, agent_workspace)
-            approval_results.append(approval_result)
+        # approval_results = []
+        # for resource_spec in resource_specifications:
+        #     approval_context = _prepare_approval_context(resource_spec, generation_context)
+        #     approval_result = _check_resource_approval(approval_context, agent_workspace)
+        #     approval_results.append(approval_result)
             
-            # If approval is rejected, skip this resource
-            if approval_result.get("status") == "rejected":
-                continue
+        #     # If approval is rejected, skip this resource
+        #     if approval_result.get("status") == "rejected":
+        #         continue
         
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
@@ -300,11 +310,12 @@ def generate_terraform_resources(
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
             resource_specifications=escape_json_for_template(json.dumps(resource_specifications, indent=2)),
-            current_stage=planning_context.get('current_stage', 'planning'),
+            current_stage=planning_context.get('current_stage', 'generation'),
             active_agent=agent_workspace.get('active_agent', 'resource_configuration_agent'),
             previous_agent_results=escape_json_for_template(json.dumps(agent_workspace.get('resolved_dependencies', {}), indent=2)),
-            generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
+            planning_individual_results=escape_json_for_template(json.dumps(extract_planning_individual_results(generation_context), indent=2)),
             specific_requirements=extract_specific_requirements(generation_context),
+            configuration_optimizer_data=escape_json_for_template(json.dumps(extract_configuration_optimizer_data(generation_context), indent=2)),
             handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2)),
             agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
         )
@@ -406,7 +417,14 @@ def generate_terraform_resources(
             }
         )
         
-        return enhanced_response
+        update_agent_workspace(
+            "resource_configuration_agent", {
+                "discovered_dependencies": enhanced_response.discovered_dependencies,
+                "handoff_recommendations": enhanced_response.handoff_recommendations,
+            }
+        )
+        # Convert Pydantic object to JSON-serializable dict before returning
+        return enhanced_response.model_dump(mode='json')
         
     except Exception as e:
         resource_generator_logger.log_structured(
@@ -423,24 +441,149 @@ def generate_terraform_resources(
 
 
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
-    """Extract specific requirements from context"""
+    """Extract specific requirements from context including architecture patterns, well-architected alignment, and security considerations"""
     requirements = []
     
+    # Extract from planner data structure
+    planner_data = context.get('planner_data', {})
+    
+    # Extract architecture patterns from AWS service mapping
+    aws_service_mapping = planner_data.get('requirements_data', {}).get('aws_service_mapping', {})
+    services = aws_service_mapping.get('services', [])
+    if services:
+        first_service = services[0]
+        if 'architecture_patterns' in first_service:
+            requirements.append(f"Architecture Patterns: {first_service['architecture_patterns']}")
+        
+        if 'well_architected_alignment' in first_service:
+            requirements.append(f"Well-Architected Alignment: {first_service['well_architected_alignment']}")
+        
+        if 'cost_optimization_recommendations' in first_service:
+            requirements.append(f"Cost Optimization: {first_service['cost_optimization_recommendations']}")
+    
+    # Extract security considerations from module structure plan
+    execution_data = planner_data.get('execution_data', {})
+    module_structure_plan = execution_data.get('module_structure_plan', {})
+    module_structure_plans = module_structure_plan.get('module_structure_plans', [])
+    if module_structure_plans:
+        first_plan = module_structure_plans[0]
+        if 'security_considerations' in first_plan:
+            requirements.append(f"Security Considerations: {first_plan['security_considerations']}")
+        
+        if 'reusability_guidance' in first_plan:
+            requirements.append(f"Reusability Guidance: {first_plan['reusability_guidance']}")
+    
+    requirements_text = '\n'.join(requirements) if requirements else "No specific requirements specified"
+    
+    # Escape curly braces to prevent template variable interpretation
+    return requirements_text.replace('{', '{{').replace('}', '}}')
+
+def extract_planning_individual_results(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract planning results from individual agents in the generator swarm"""
+    planning_results = {}
+    
+    # Extract execution plan data structure
     exec_plan = context.get('execution_plan', {})
     
-    if 'security_requirements' in exec_plan:
-        requirements.append(f"Security: {exec_plan['security_requirements']}")
+    # Extract terraform files structure
+    if 'terraform_files' in exec_plan:
+        planning_results['terraform_files'] = exec_plan['terraform_files']
     
-    if 'compliance_requirements' in exec_plan:
-        requirements.append(f"Compliance: {exec_plan['compliance_requirements']}")
+    # Extract variable definitions
+    if 'variable_definitions' in exec_plan:
+        planning_results['variable_definitions'] = exec_plan['variable_definitions']
     
-    if 'cost_constraints' in exec_plan:
-        requirements.append(f"Cost: {exec_plan['cost_constraints']}")
+    # Extract local values
+    if 'local_values' in exec_plan:
+        planning_results['local_values'] = exec_plan['local_values']
     
-    if 'performance_requirements' in exec_plan:
-        requirements.append(f"Performance: {exec_plan['performance_requirements']}")
+    # Extract data sources
+    if 'data_sources' in exec_plan:
+        planning_results['data_sources'] = exec_plan['data_sources']
     
-    return '\n'.join(requirements) if requirements else "No specific requirements specified"
+    # Extract output definitions
+    if 'output_definitions' in exec_plan:
+        planning_results['output_definitions'] = exec_plan['output_definitions']
+    
+    # Extract service and module metadata
+    planning_results['service_metadata'] = {
+        'service_name': exec_plan.get('service_name', 'unknown'),
+        'module_name': exec_plan.get('module_name', 'unknown'),
+        'target_environment': exec_plan.get('target_environment', 'development')
+    }
+    
+    # Extract planning context metadata
+    planning_results['planning_metadata'] = {
+        'dependencies': context.get('dependencies', []),
+        'security_considerations': context.get('security_considerations', []),
+        'cost_estimates': context.get('cost_estimates', {})
+    }
+    
+    return planning_results
+
+def extract_configuration_optimizer_data(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract configuration optimizer data from planner data structure"""
+    optimizer_data = {}
+    
+    # Extract from planner data structure
+    planner_data = context.get('planner_data', {})
+    execution_data = planner_data.get('execution_data', {})
+    configuration_optimizer_data = execution_data.get('configuration_optimizer_data', {})
+    
+    # Extract configuration optimizers
+    if 'configuration_optimizers' in configuration_optimizer_data:
+        optimizer_data['configuration_optimizers'] = configuration_optimizer_data['configuration_optimizers']
+    
+    return optimizer_data
+
+def create_focused_context(generation_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a focused context with only the essential data points from test.log"""
+    focused_context = {}
+    
+    # Extract from planner data structure
+    planner_data = generation_context.get('planner_data', {})
+    
+    # Architecture & Requirements Data
+    aws_service_mapping = planner_data.get('requirements_data', {}).get('aws_service_mapping', {})
+    services = aws_service_mapping.get('services', [])
+    if services:
+        first_service = services[0]
+        focused_context.update({
+            'architecture_patterns': first_service.get('architecture_patterns'),
+            'well_architected_alignment': first_service.get('well_architected_alignment'),
+            'cost_optimization_recommendations': first_service.get('cost_optimization_recommendations')
+        })
+    
+    # Security & Reusability Data
+    execution_data = planner_data.get('execution_data', {})
+    module_structure_plan = execution_data.get('module_structure_plan', {})
+    module_structure_plans = module_structure_plan.get('module_structure_plans', [])
+    if module_structure_plans:
+        first_plan = module_structure_plans[0]
+        focused_context.update({
+            'security_considerations': first_plan.get('security_considerations'),
+            'reusability_guidance': first_plan.get('reusability_guidance')
+        })
+    
+    # Configuration Optimizer Data
+    configuration_optimizer_data = execution_data.get('configuration_optimizer_data', {})
+    focused_context['configuration_optimizers'] = configuration_optimizer_data.get('configuration_optimizers')
+    
+    # Execution Plan Data
+    execution_plan_data = execution_data.get('execution_plan_data', {})
+    execution_plans = execution_plan_data.get('execution_plans', [])
+    if execution_plans:
+        first_execution_plan = execution_plans[0]
+        focused_context.update({
+            'terraform_files': first_execution_plan.get('terraform_files'),
+            'variable_definitions': first_execution_plan.get('variable_definitions'),
+            'local_values': first_execution_plan.get('local_values'),
+            'data_sources': first_execution_plan.get('data_sources'),
+            'output_definitions': first_execution_plan.get('output_definitions'),
+            'resource_configurations': first_execution_plan.get('resource_configurations')
+        })
+    
+    return focused_context
 
 def post_process_llm_response(
     llm_response: TerraformResourceGenerationResponse,
@@ -449,6 +592,9 @@ def post_process_llm_response(
     start_time: datetime
 ) -> TerraformResourceGenerationResponse:
     """Post-process LLM response with comprehensive validation and enhancements"""
+    
+    # Create focused context with only essential data points
+    focused_context = create_focused_context(context)
     
     # Calculate actual generation duration
     generation_duration = (datetime.now() - start_time).total_seconds()
@@ -476,24 +622,19 @@ def post_process_llm_response(
     llm_response.generated_resources = validated_resources
     llm_response.generation_metadata.validation_errors.extend(validation_errors)
     
-    # Enhance dependencies with additional context
-    enhanced_dependencies = enhance_dependencies(
-        llm_response.discovered_dependencies, 
-        validated_resources,
-        context
-    )
-    llm_response.discovered_dependencies = enhanced_dependencies
+    # Use original discovered dependencies without enhancement
+    # The LLM already provides the necessary context for each dependency
     
     # Create comprehensive handoff recommendations
     llm_response.handoff_recommendations = create_enhanced_handoff_recommendations(
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         validated_resources
     )
     
     # Add comprehensive state updates
     llm_response.state_updates = create_comprehensive_state_updates(
         validated_resources,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         agent_workspace,
         llm_response.completion_status
     )
@@ -501,7 +642,7 @@ def post_process_llm_response(
     # Add workspace updates
     llm_response.workspace_updates = create_workspace_updates(
         validated_resources,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.generation_metadata,
         llm_response.completion_status
     )
@@ -509,7 +650,7 @@ def post_process_llm_response(
     # Add checkpoint data
     llm_response.checkpoint_data = create_checkpoint_data(
         validated_resources,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.completion_status
     )
     
@@ -729,40 +870,6 @@ def fix_resource_name(resource_name: str) -> str:
     
     return fixed
 
-def enhance_dependencies(
-    dependencies: List[DiscoveredDependency],
-    resources: List[TerraformResourceBlock],
-    context: Dict[str, Any]
-) -> List[DiscoveredDependency]:
-    """Enhance dependencies with additional context and validation"""
-    
-    enhanced_deps = []
-    
-    for dep in dependencies:
-        enhanced_dep = dep.copy(deep=True)
-        
-        # Add resource context
-        source_resource = next(
-            (r for r in resources if r.resource_name == dep.source_resource),
-            None
-        )
-        
-        if source_resource:
-            enhanced_dep.handoff_context.update({
-                'source_resource_type': source_resource.resource_type,
-                'source_resource_config': source_resource.configuration_attributes
-            })
-        
-        # Add execution plan context
-        enhanced_dep.handoff_context.update({
-            'execution_plan_excerpt': context.get('execution_plan', {}),
-            'generation_context': context
-        })
-        
-        enhanced_deps.append(enhanced_dep)
-    
-    return enhanced_deps
-
 def create_enhanced_handoff_recommendations(
     dependencies: List[DiscoveredDependency],
     resources: List[TerraformResourceBlock]
@@ -799,7 +906,7 @@ def create_enhanced_handoff_recommendations(
             handoff_reason=f"Resolve {len(deps)} dependencies for resource generation",
             handoff_priority=max_priority,
             context_payload={
-                'dependencies': [dep.dict() for dep in deps],
+                'dependencies': [dep.model_dump() for dep in deps],
                 'total_count': len(deps),
                 'priority_levels': [dep.priority_level for dep in deps],
                 'affected_resources': [dep.source_resource for dep in deps]
@@ -822,10 +929,10 @@ def create_comprehensive_state_updates(
     """Create comprehensive state updates for the swarm"""
     
     updates = {
-        'terraform_resources': [resource.dict() for resource in resources],
+        'terraform_resources': [resource.model_dump() for resource in resources],
         'pending_dependencies': {
             **agent_workspace.get('pending_dependencies', {}),
-            'resource_configuration_agent': [dep.dict() for dep in dependencies]
+            'resource_configuration_agent': [dep.model_dump() for dep in dependencies]
         },
         'agent_status_matrix': {
             **agent_workspace.get('agent_status_matrix', {}),
@@ -848,9 +955,9 @@ def create_workspace_updates(
     """Create workspace updates for the agent"""
     
     return {
-        'generated_resources': [resource.dict() for resource in resources],
-        'pending_dependencies': [dep.dict() for dep in dependencies],
-        'generation_metrics': metrics.dict(),
+        'generated_resources': [resource.model_dump() for resource in resources],
+        'pending_dependencies': [dep.model_dump() for dep in dependencies],
+        'generation_metrics': metrics.model_dump(),
         'completion_status': completion_status,
         'completion_timestamp': datetime.now().isoformat(),
         'resource_summary': {
