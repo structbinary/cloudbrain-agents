@@ -16,8 +16,8 @@ from langgraph.types import Command
 from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
-from .resource_generator_prompts import RESOURCE_CONFIGURATION_USER_PROMPT_TEMPLATE, RESOURCE_CONFIGURATION_SYSTEM_PROMPT
-from ..global_state import get_current_state, update_agent_workspace
+from .resource_generator_prompts import RESOURCE_CONFIGURATION_USER_PROMPT_TEMPLATE, RESOURCE_CONFIGURATION_SYSTEM_PROMPT, RESOURCE_CONFIGURATION_USER_PROMPT_TEMPLATE_REFINED
+from ..global_state import get_current_state, update_agent_workspace, update_current_state
 # Create agent logger for resource generator
 resource_generator_logger = AgentLogger("RESOURCE_GENERATOR")
 
@@ -182,6 +182,9 @@ class TerraformResourceGenerationResponse(BaseModel):
     generation_metadata: ResourceGenerationMetrics = Field(..., description="Generation performance metrics")
     generation_timestamp: datetime = Field(default_factory=datetime.now)
     
+    # Complete resources file
+    complete_resources_file: str = Field(..., description="Complete resources.tf file content")
+    
     # State updates
     state_updates: Dict[str, Any] = Field(default_factory=dict, description="Updates to apply to swarm state")
     workspace_updates: Dict[str, Any] = Field(..., description="Updates for agent workspace")
@@ -229,6 +232,41 @@ def generate_terraform_resources(
     and provides handoff recommendations to other agents in the planning stage. It supports
     both planner specifications and dynamic agent communication.
     """
+    start_time = datetime.now()
+
+    last_3_messages = state.get('messages', [])[-3:]
+    
+    # Check last 3 messages for ToolMessage types and extract state updates from model_extra
+    tool_message_analysis = {}
+    for i, msg in enumerate(last_3_messages):
+        if isinstance(msg, ToolMessage):
+            # Extract model_extra field
+            model_extra = None
+            if hasattr(msg, 'model_extra') and msg.model_extra:
+                model_extra = msg.model_extra
+            elif hasattr(msg, 'additional_kwargs') and msg.additional_kwargs:
+                model_extra = msg.additional_kwargs.get('model_extra')
+            
+            # Extract state updates from model_extra if available
+            if (model_extra and 'metadata' in model_extra and 'state_updates' in model_extra['metadata'] 
+                and model_extra['metadata'].get('handoff_destination') == 'resource_configuration_agent'):
+                state_updates = model_extra['metadata']['state_updates']
+                tool_message_analysis["agent_status_matrix"] = state_updates.get('agent_status_matrix')
+                tool_message_analysis["pending_dependencies"] = state_updates.get('pending_dependencies')
+                tool_message_analysis["dependency_graph"] = state_updates.get('dependency_graph')
+                tool_message_analysis["agent_workspaces"] = state_updates.get('agent_workspaces')
+                tool_message_analysis["handoff_queue"] = state_updates.get('handoff_queue')
+
+    resource_generator_logger.log_structured(
+        level="INFO",
+        message="Last 3 messages ToolMessage state updates analysis",
+        extra={
+            "total_messages": len(last_3_messages),
+            "tool_message_count": len(tool_message_analysis),
+            "state_updates_analysis": tool_message_analysis
+        }
+    )
+    
     previous_state = get_current_state()
 
     if isinstance(previous_state, str):
@@ -242,42 +280,57 @@ def generate_terraform_resources(
                 extra={"error": str(e)})
     
     try:
-        # Try to get data from injected state first, then fallback to global state
-        if state and state.get("execution_plan_data") and state.get("agent_workspaces") and state.get("planning_context"):
-            # Use injected state
-            execution_plan_data = state.get("execution_plan_data", {})
-            agent_workspace = state.get("agent_workspaces", {}).get("resource_configuration_agent", {})
-            planning_context = state.get("planning_context", {})
+        execution_plan_data = previous_state.get("execution_plan_data", {})
+        planning_context = previous_state.get("planning_context", {})
+        generated_resources = previous_state.get("agent_workspaces", {}).get("resource_configuration_agent", {}).get("complete_resources_file", "")
+        generated_variables = previous_state.get("agent_workspaces", {}).get("variable_definition_agent", {}).get("complete_variables_file", "")
+        generated_data_sources = previous_state.get("agent_workspaces", {}).get("data_source_agent", {}).get("complete_data_sources_file", "")
+        generated_local_values = previous_state.get("agent_workspaces", {}).get("local_values_agent", {}).get("complete_locals_file", "")
+        generated_output_definitions = previous_state.get("agent_workspaces", {}).get("output_definition_agent", {}).get("complete_outputs_file", "")
+        if execution_plan_data:
+            planning_resource_specifications = execution_plan_data.get('execution_plans', [])[0].get('resource_configurations', [])
+            planning_variable_definitions = execution_plan_data.get('execution_plans', [])[0].get('variable_definitions', [])
+            planning_local_values = execution_plan_data.get('execution_plans', [])[0].get('local_values', [])
+            planning_data_sources = execution_plan_data.get('execution_plans', [])[0].get('data_sources', [])
+            planning_output_definitions = execution_plan_data.get('execution_plans', [])[0].get('output_definitions', [])
+            planning_terraform_files = execution_plan_data.get('execution_plans', [])[0].get('terraform_files', [])
         else:
-            # Fallback to global state (previous_state)
-            execution_plan_data = previous_state.get("execution_plan_data", {})
-            agent_workspace = previous_state.get("agent_workspaces", {}).get("resource_configuration_agent", {})
-            planning_context = previous_state.get("planning_context", {})
+            planning_resource_specifications = []
+            planning_variable_definitions = []
+            planning_local_values = []
+            planning_data_sources = []
+            planning_output_definitions = []
+            planning_terraform_files = []
+
+        if tool_message_analysis:
+            agent_workspaces = tool_message_analysis.get("agent_workspaces", {}).get("resource_configuration_agent", {})
+        else:
+            agent_workspaces = {}
         
-        start_time = datetime.now()
-        
-        # Get resource specifications from planner input or current task
-        resource_specifications = (
-            agent_workspace.get('current_task', {}).get('resource_specifications', []) or
-            agent_workspace.get('planner_input', [])
-        )
-        
-        # If we don't have resource specifications from agent workspace, try execution plan data
-        if not resource_specifications and execution_plan_data:
-            execution_plans = execution_plan_data.get('execution_plans', [])
-            if execution_plans:
-                # Get resource configurations from the first execution plan
-                first_plan = execution_plans[0]
-                resource_specifications = first_plan.get('resource_configurations', [])
-        
-        # Get generation context from planning context
+        # Extract the current task and context from the handoff
+        if agent_workspaces:
+            current_task = agent_workspaces.get("current_task", {})
+            handoff_context = agent_workspaces.get("context", {})
+            agent_workspace = {
+                "current_task": current_task,
+                "handoff_context": handoff_context
+            }
+        else:
+            agent_workspace = {
+                "current_task": {},
+                "handoff_context": {}
+            }
+            
+    
+
+    # Get generation context from planning context
         generation_context = planning_context
         
         resource_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform resource generation",
             extra={
-                "resource_specifications_count": len(resource_specifications),
+                "resource_specifications_count": len(planning_resource_specifications),
                 "has_execution_plan_data": bool(execution_plan_data),
                 "has_agent_workspace": bool(agent_workspace),
                 "has_planning_context": bool(planning_context)
@@ -304,21 +357,28 @@ def generate_terraform_resources(
             """Escape curly braces in JSON strings for template compatibility"""
             return json_str.replace('{', '{{').replace('}', '}}')
         
-        formatted_user_prompt = RESOURCE_CONFIGURATION_USER_PROMPT_TEMPLATE.format(
+        formatted_user_prompt = RESOURCE_CONFIGURATION_USER_PROMPT_TEMPLATE_REFINED.format(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
-            resource_specifications=escape_json_for_template(json.dumps(resource_specifications, indent=2)),
+            resource_specifications=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
+            planning_variable_definitions=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
+            planning_local_values=escape_json_for_template(json.dumps(planning_local_values, indent=2)),
+            planning_data_sources=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
+            planning_output_definitions=escape_json_for_template(json.dumps(planning_output_definitions, indent=2)),
+            planning_terraform_files=escape_json_for_template(json.dumps(planning_terraform_files, indent=2)),
             current_stage=planning_context.get('current_stage', 'generation'),
             active_agent=agent_workspace.get('active_agent', 'resource_configuration_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(agent_workspace.get('resolved_dependencies', {}), indent=2)),
-            planning_individual_results=escape_json_for_template(json.dumps(extract_planning_individual_results(generation_context), indent=2)),
-            specific_requirements=extract_specific_requirements(generation_context),
-            configuration_optimizer_data=escape_json_for_template(json.dumps(extract_configuration_optimizer_data(generation_context), indent=2)),
-            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2)),
-            agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
-        )
+            workspace_generated_resources=escape_json_for_template(generated_resources),
+            workspace_generated_variables=escape_json_for_template(generated_variables),
+            workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
+            workspace_generated_local_values=escape_json_for_template(generated_local_values),
+            workspace_generated_outputs=escape_json_for_template(generated_output_definitions),
+            specific_requirements_patterns=extract_specific_requirements(generation_context),
+            configuration_optimizer_actionable=escape_json_for_template(json.dumps(extract_configuration_optimizer_data(generation_context), indent=2)),
+            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
+        ) 
         
         # Create parser for structured output
         parser = PydanticOutputParser(pydantic_object=TerraformResourceGenerationResponse)
@@ -355,6 +415,14 @@ def generate_terraform_resources(
                 max_tokens=llm_config['max_tokens']
             )
             
+            llm_higher_config = config_instance.get_llm_higher_config()
+            model_higher = LLMProvider.create_llm(
+                provider=llm_higher_config['provider'],
+                model=llm_higher_config['model'],
+                temperature=llm_higher_config['temperature'],
+                max_tokens=llm_higher_config['max_tokens']
+            )
+
             resource_generator_logger.log_structured(
                 level="DEBUG",
                 message="LLM initialized successfully for resource generation",
@@ -373,7 +441,8 @@ def generate_terraform_resources(
             )
             raise
         
-        chain = prompt | model | parser
+        # chain = prompt | model | parser
+        chain = prompt | model_higher | parser
         
         resource_generator_logger.log_structured(
             level="DEBUG",
@@ -419,12 +488,27 @@ def generate_terraform_resources(
         
         update_agent_workspace(
             "resource_configuration_agent", {
-                "discovered_dependencies": enhanced_response.discovered_dependencies,
                 "handoff_recommendations": enhanced_response.handoff_recommendations,
+                "complete_resources_file": enhanced_response.complete_resources_file,
+                **enhanced_response.workspace_updates  # Include all workspace_updates
             }
         )
-        # Convert Pydantic object to JSON-serializable dict before returning
-        return enhanced_response.model_dump(mode='json')
+        resolved_dependencies = previous_state.get("pending_dependencies", {}).get("resource_configuration_agent", [])
+        # Get current resolved dependencies and append new ones
+        current_resolved_deps = get_current_state().get("resolved_dependencies", {})
+        updated_resolved_deps = {
+            **current_resolved_deps,
+            "resource_configuration_agent": [
+                *current_resolved_deps.get("resource_configuration_agent", []),
+                *resolved_dependencies
+            ]
+        }
+
+        update_current_state({
+            "resolved_dependencies": updated_resolved_deps
+        })
+        # Return only state_updates as JSON for LangGraph state management
+        return enhanced_response.state_updates
         
     except Exception as e:
         resource_generator_logger.log_structured(
@@ -621,6 +705,9 @@ def post_process_llm_response(
     # Update response with validated resources
     llm_response.generated_resources = validated_resources
     llm_response.generation_metadata.validation_errors.extend(validation_errors)
+    
+    # Generate complete resources file
+    llm_response.complete_resources_file = generate_complete_resources_file(validated_resources)
     
     # Use original discovered dependencies without enhancement
     # The LLM already provides the necessary context for each dependency
@@ -1175,4 +1262,24 @@ def _assess_security_impact(resource_spec: Dict[str, Any]) -> str:
         return "medium"
     
     return "low"
+
+
+def generate_complete_resources_file(resources: List[TerraformResourceBlock]) -> str:
+    """Generate complete resources.tf file from resource blocks"""
+    
+    if not resources:
+        return ""
+    
+    # Generate the complete file - preserve the original order from LLM
+    lines = []
+    lines.append("# Terraform Resources")
+    lines.append(f"# Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+    
+    # Add resources in the order they were generated by the LLM
+    for resource in resources:
+        lines.append(resource.hcl_block)
+        lines.append("")
+    
+    return "\n".join(lines)
 

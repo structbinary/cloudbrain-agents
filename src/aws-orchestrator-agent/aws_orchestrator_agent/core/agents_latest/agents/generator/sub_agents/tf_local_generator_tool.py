@@ -15,6 +15,7 @@ from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
+from ..global_state import get_current_state, set_current_state, update_agent_workspace, update_current_state
 from .local_generator_prompts import LOCAL_VALUES_AGENT_SYSTEM_PROMPT, LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE
 
 # Create agent logger for local values generator
@@ -187,6 +188,7 @@ class TerraformLocalValueGenerationResponse(BaseModel):
     
     # Generation results
     generated_locals: List[TerraformLocalValue] = Field(..., description="Successfully generated local values")
+    complete_locals_file: str = Field(..., description="Complete locals.tf file content")
     discovered_dependencies: List[DiscoveredLocalDependency] = Field(default_factory=list, description="Dependencies requiring handoffs")
     
     # Agent coordination
@@ -222,43 +224,118 @@ class TerraformLocalValueGenerationResponse(BaseModel):
 
 @tool("generate_terraform_locals")
 def generate_terraform_locals(
-    execution_plan_data: dict = None,
-    agent_workspace: dict = None,
-    planning_context: dict = None
+    state: Annotated[Any, InjectedState] = None,
 ) -> TerraformLocalValueGenerationResponse:
     """
     Generate Terraform local values from execution plan specifications and agent requests.
     
     Args:
-        execution_plan_data: Execution plan data containing local value requirements
-        agent_workspace: Agent workspace data for the local values agent
-        planning_context: Planning context with generation requirements
+        state: GeneratorSwarmState containing all the data (execution_plan_data, agent_workspaces, planning_context)
                
     This tool analyzes expression needs, generates efficient local values, 
     identifies dependencies, and provides handoff recommendations to other agents. It supports
     both planner specifications and dynamic agent communication.
     """
     
+    start_time = datetime.now()
+
+    last_3_messages = state.get('messages', [])[-3:]
+    
+    # Check last 3 messages for ToolMessage types and extract state updates from model_extra
+    tool_message_analysis = {}
+    for i, msg in enumerate(last_3_messages):
+        if isinstance(msg, ToolMessage):
+            # Extract model_extra field
+            model_extra = None
+            if hasattr(msg, 'model_extra') and msg.model_extra:
+                model_extra = msg.model_extra
+            elif hasattr(msg, 'additional_kwargs') and msg.additional_kwargs:
+                model_extra = msg.additional_kwargs.get('model_extra')
+            
+            # Extract state updates from model_extra if available
+            if (model_extra and 'metadata' in model_extra and 'state_updates' in model_extra['metadata'] 
+                and model_extra['metadata'].get('handoff_destination') == 'local_values_agent'):
+                state_updates = model_extra['metadata']['state_updates']
+                tool_message_analysis["agent_status_matrix"] = state_updates.get('agent_status_matrix')
+                tool_message_analysis["pending_dependencies"] = state_updates.get('pending_dependencies')
+                tool_message_analysis["dependency_graph"] = state_updates.get('dependency_graph')
+                tool_message_analysis["agent_workspaces"] = state_updates.get('agent_workspaces')
+                tool_message_analysis["handoff_queue"] = state_updates.get('handoff_queue')
+    
+    local_generator_logger.log_structured(
+        level="INFO",
+        message="Last 3 messages ToolMessage state updates analysis",
+        extra={
+            "total_messages": len(last_3_messages),
+            "tool_message_count": len(tool_message_analysis)
+        }
+    )
+    previous_state = get_current_state()
+    if isinstance(previous_state, str):
+        try:
+            previous_state = json.loads(previous_state)
+        except json.JSONDecodeError as e:
+            previous_state = {}
+            local_generator_logger.log_structured(
+                level="ERROR",
+                message="Failed to parse previous state JSON",
+                extra={"error": str(e)})
+
     try:
-        start_time = datetime.now()
+        execution_plan_data = previous_state.get("execution_plan_data", {})
+        planning_context = previous_state.get("planning_context", {})
+        generated_resources = previous_state.get("agent_workspaces", {}).get("resource_configuration_agent", {}).get("complete_resources_file", "")
+        generated_variables = previous_state.get("agent_workspaces", {}).get("variable_definition_agent", {}).get("complete_variables_file", "")
+        generated_data_sources = previous_state.get("agent_workspaces", {}).get("data_source_agent", {}).get("complete_data_sources_file", "")
+        generated_local_values = previous_state.get("agent_workspaces", {}).get("local_values_agent", {}).get("complete_locals_file", "")
+        generated_output_definitions = previous_state.get("agent_workspaces", {}).get("output_definition_agent", {}).get("complete_outputs_file", "")
+        if execution_plan_data:
+            planning_resource_specifications = execution_plan_data.get('execution_plans', [])[0].get('resource_configurations', [])
+            planning_variable_definitions = execution_plan_data.get('execution_plans', [])[0].get('variable_definitions', [])
+            planning_local_values = execution_plan_data.get('execution_plans', [])[0].get('local_values', [])
+            planning_data_sources = execution_plan_data.get('execution_plans', [])[0].get('data_sources', [])
+            planning_output_definitions = execution_plan_data.get('execution_plans', [])[0].get('output_definitions', [])
+            planning_terraform_files = execution_plan_data.get('execution_plans', [])[0].get('terraform_files', [])
+        else:
+            planning_resource_specifications = []
+            planning_variable_definitions = []
+            planning_local_values = []
+            planning_data_sources = []
+            planning_output_definitions = []
+            planning_terraform_files = []
+
         
-        # Use provided parameters or defaults
-        execution_plan_data = execution_plan_data or {}
-        agent_workspace = agent_workspace or {}
-        planning_context = planning_context or {}
+        if tool_message_analysis:
+            agent_workspaces = tool_message_analysis.get("agent_workspaces", {}).get("local_values_agent", {})
+        else:
+            agent_workspaces = {}
         
+        # Extract the current task and context from the handoff
+        if agent_workspaces:
+            current_task = agent_workspaces.get("current_task", {})
+            handoff_context = agent_workspaces.get("context", {})
+            agent_workspace = {
+                "current_task": current_task,
+                "handoff_context": handoff_context
+            }
+        else:
+            agent_workspace = {
+                "current_task": {},
+                "handoff_context": {}
+            }
+
         # Extract data from parameters
-        local_value_requirements = execution_plan_data.get('local_value_requirements', [])
-        generation_context = planning_context or {}
+        local_value_requirements = planning_local_values
+        generation_context = planning_context
         
         local_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform local values generation",
             extra={
                 "local_value_requirements_count": len(local_value_requirements),
-                "generation_id": agent_workspace.get('generation_id', 'unknown'),
-                "current_stage": planning_context.get('current_stage', 'unknown'),
-                "active_agent": agent_workspace.get('active_agent', 'unknown')
+                "has_execution_plan_data": bool(execution_plan_data),
+                "has_agent_workspace": bool(agent_workspace),
+                "has_planning_context": bool(planning_context)
             }
         )
         
@@ -277,13 +354,20 @@ def generate_terraform_locals(
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
             local_value_requirements=escape_json_for_template(json.dumps(local_value_requirements, indent=2)),
+            planning_resources=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
+            planning_variables=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
+            planning_data_sources=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
+            planning_output_definitions=escape_json_for_template(json.dumps(planning_output_definitions, indent=2)),
+            planning_terraform_files=escape_json_for_template(json.dumps(planning_terraform_files, indent=2)),
             current_stage=planning_context.get('current_stage', 'planning'),
             active_agent=agent_workspace.get('active_agent', 'local_values_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(agent_workspace.get('resolved_dependencies', {}), indent=2)),
-            generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
+            workspace_generated_resources=escape_json_for_template(generated_resources),
+            workspace_generated_variables=escape_json_for_template(generated_variables),
+            workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
+            workspace_generated_local_values=escape_json_for_template(generated_local_values),
+            workspace_generated_outputs=escape_json_for_template(generated_output_definitions),
             specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2)),
-            agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
+            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
         )
         
         # Create parser for structured output
@@ -321,6 +405,14 @@ def generate_terraform_locals(
                 max_tokens=llm_config['max_tokens']
             )
             
+            llm_higher_config = config_instance.get_llm_higher_config()
+            model_higher = LLMProvider.create_llm(
+                provider=llm_higher_config['provider'],
+                model=llm_higher_config['model'],
+                temperature=llm_higher_config['temperature'],
+                max_tokens=llm_higher_config['max_tokens']
+            )
+
             local_generator_logger.log_structured(
                 level="DEBUG",
                 message="LLM initialized successfully for local values generation",
@@ -339,7 +431,7 @@ def generate_terraform_locals(
             )
             raise
         
-        chain = prompt | model | parser
+        chain = prompt | model_higher | parser
         
         local_generator_logger.log_structured(
             level="DEBUG",
@@ -382,11 +474,30 @@ def generate_terraform_locals(
                 "generation_id": agent_workspace.get('generation_id', 'unknown')
             }
         )
-        
-        return enhanced_response
+        update_agent_workspace(
+            "local_values_agent", {
+                "complete_locals_file": enhanced_response.complete_locals_file,
+                "handoff_recommendations": enhanced_response.handoff_recommendations,
+                **enhanced_response.workspace_updates  # Include all workspace_updates
+            }
+        )
+        resolved_dependencies = previous_state.get("pending_dependencies", {}).get("local_values_agent", [])
+        # Get current resolved dependencies and append new ones
+        current_resolved_deps = get_current_state().get("resolved_dependencies", {})
+        updated_resolved_deps = {
+            **current_resolved_deps,
+            "local_values_agent": [
+                *current_resolved_deps.get("local_values_agent", []),
+                *resolved_dependencies
+            ]
+        }
+        update_current_state({
+            "resolved_dependencies": updated_resolved_deps
+        })
+        # Return only state_updates as JSON for LangGraph state management
+        return enhanced_response.state_updates
         
     except Exception as e:
-        generator_state = agent_workspace.get('generator_state', {})
         local_generator_logger.log_structured(
             level="ERROR",
             message="Terraform local values generation failed",
@@ -496,7 +607,29 @@ def post_process_local_values_response(
         llm_response.completion_status
     )
     
+    # Generate complete locals file
+    llm_response.complete_locals_file = generate_complete_locals_file(validated_locals)
+    
     return llm_response
+
+def generate_complete_locals_file(locals: List[TerraformLocalValue]) -> str:
+    """Generate complete locals.tf file content from local values"""
+    if not locals:
+        return ""
+    
+    # Generate file header
+    file_content = "# Local Values\n"
+    file_content += "# This file contains all computed local values for the infrastructure\n\n"
+    file_content += "locals {\n"
+    
+    # Generate local values
+    for local_value in locals:
+        file_content += f"  # {local_value.description}\n"
+        file_content += f"  {local_value.hcl_declaration}\n\n"
+    
+    file_content += "}\n"
+    
+    return file_content.strip()
 
 def validate_terraform_local_value(local_value: TerraformLocalValue) -> Dict[str, Any]:
     """Validate individual Terraform local value"""

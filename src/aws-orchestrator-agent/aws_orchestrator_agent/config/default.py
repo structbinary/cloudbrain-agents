@@ -18,8 +18,8 @@ class DefaultConfig:
     """Default configuration for the AWS Orchestrator Agent."""
     # LLM Configuration
     LLM_PROVIDER: str = "openai"
-    LLM_MODEL: str = "gpt-4o-mini"
-    LLM_TEMPERATURE: float = 0.0
+    LLM_MODEL: str = "gpt-5-mini"
+    LLM_TEMPERATURE: float = 1
     LLM_MAX_TOKENS: int = 12000
     
     # Higher LLM Configuration (for complex reasoning tasks)

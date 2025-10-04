@@ -9,7 +9,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph_supervisor.handoff import METADATA_KEY_HANDOFF_DESTINATION
 from .generator_state import GeneratorSwarmState, DependencyType, GeneratorAgentStatus
 from .generator_state_controller import GeneratorStageController
-from .global_state import get_current_state
+from .global_state import get_current_state, update_current_state
 from aws_orchestrator_agent.utils.logger import AgentLogger
 import datetime
 
@@ -39,81 +39,61 @@ class GeneratorStageHandoffManager:
             priority_level: Annotated[int, "Priority: 1=low, 5=critical"] = 3,
             blocking: Annotated[bool, "Whether source agent should wait for completion"] = True
         ) -> Command:
-            """
-            Handoff tool for coordinating dependencies between generator swarm agents.
-            
-            This tool enables the current agent to hand off specific tasks to target agents
-            when dependencies are discovered during resource generation. It manages the
-            dependency resolution workflow by updating state, tracking dependencies, and
-            coordinating agent transitions.
-            
-            Args:
-                task_description: Clear, specific description of what the target agent needs to accomplish.
-                    Should be actionable and include context about the dependency requirements.
-                    Example: "Define variables for VPC configuration including CIDR block and DNS settings"
-                
-                dependency_data: Structured dictionary containing detailed dependency information.
-                    Must include specific data needed by the target agent to fulfill the dependency.
-                    For variable dependencies, include:
-                    - variables: List of variable definitions with name, type, description, default values
-                    - validation_rules: Any validation requirements
-                    - usage_context: How variables will be used
-                    Example: {
-                        "variables": [
-                            {"name": "cidr_block", "type": "string", "description": "VPC CIDR block", "default": "10.0.0.0/16"},
-                            {"name": "enable_dns_support", "type": "bool", "description": "Enable DNS support", "default": true}
-                        ],
-                        "validation_rules": ["cidr_block must be valid CIDR notation"],
-                        "usage_context": "Used in aws_vpc resource configuration"
-                    }
-                
-                state: Injected LangGraph state containing current swarm state, agent workspaces,
-                    and planning context. Automatically provided by LangGraph.
-                
-                tool_call_id: Unique identifier for this tool call. Automatically provided by LangGraph.
-                
-                priority_level: Priority level from 1 (low) to 5 (critical). Determines handoff order
-                    when multiple dependencies exist. Critical dependencies (5) are handled first.
-                    - 5 (Critical): Variable dependencies that block resource generation
-                    - 4 (High): Local value dependencies for computed expressions
-                    - 3 (Medium): Data source dependencies for external lookups
-                    - 2 (Low): Optional dependencies that can be deferred
-                    - 1 (Minimal): Non-blocking dependencies
-                
-                blocking: Whether the source agent should wait for the target agent to complete
-                    before continuing. True for critical dependencies, False for parallel processing.
-                    - True: Source agent waits, used for blocking dependencies
-                    - False: Source agent continues, used for parallel dependencies
-            
-            Returns:
-                ToolMessage: LangGraph ToolMessage with handoff metadata that transitions control to the target agent
-                with updated state containing dependency information and agent status changes in metadata.
-            
-            Raises:
-                ValueError: If required parameters are missing or invalid
-                RuntimeError: If state update fails or agent transition cannot be completed
-            
-            Example:
-                # Hand off variable definition task
-                result = handoff_to_variable_definition_agent_resource_to_variable(
-                    task_description="Define VPC configuration variables",
-                    dependency_data={
-                        "variables": [
-                            {"name": "vpc_cidr", "type": "string", "description": "VPC CIDR block"},
-                            {"name": "enable_dns", "type": "bool", "description": "Enable DNS support"}
-                        ]
-                    },
-                    priority_level=5,
-                    blocking=True
-                )
-            
-            State Updates:
-                - Updates pending_dependencies with new dependency request
-                - Updates dependency_graph to track agent relationships  
-                - Updates agent_status_matrix to reflect agent states
-                - Creates target agent context with dependency information
-                - Generates ToolMessage for handoff communication
-            """
+            """Handoff tool for coordinating dependencies between generator swarm agents.
+
+Enables the current agent to delegate specific tasks to target agents when 
+dependencies are discovered during resource generation. Updates state, tracks 
+dependencies, and coordinates agent transitions.
+
+Args:
+    task_description (str): Specific, actionable task for the target agent.
+        Example: "Define VPC variables including CIDR block and DNS settings"
+    
+    dependency_data (dict): Structured dependency information for the target agent.
+        For variable dependencies:
+        - variables: List with name, type, description, default values
+        - validation_rules: Validation requirements (optional)
+        - usage_context: How variables will be used (optional)
+        Example: {
+            "variables": [
+                {"name": "cidr_block", "type": "string", "description": "VPC CIDR", "default": "10.0.0.0/16"},
+                {"name": "enable_dns", "type": "bool", "description": "Enable DNS", "default": true}
+            ]
+        }
+    
+    state: LangGraph state with swarm context. Automatically injected.
+    
+    tool_call_id (str): Unique identifier. Automatically provided by LangGraph.
+    
+    priority_level (int): Priority from 1 (low) to 5 (critical). Determines handoff order.
+        - 5: Critical variable dependencies (blocking)
+        - 4: High local value dependencies (blocking)  
+        - 3: Medium data source dependencies (non-blocking)
+        - 2-1: Optional/minimal dependencies
+    
+    blocking (bool): Whether source agent waits for target completion.
+        True for critical dependencies, False for parallel processing.
+
+Returns:
+    Command: LangGraph command to transition to target agent.
+
+Raises:
+    ValueError: Missing or invalid required parameters.
+    RuntimeError: State update or agent transition failure.
+
+Example:
+    result = handoff_to_variable_definition_agent_resource_to_variable(
+        task_description="Define VPC configuration variables",
+        dependency_data={
+            "variables": [
+                {"name": "vpc_cidr", "type": "string", "description": "VPC CIDR block"},
+                {"name": "enable_dns", "type": "bool", "description": "Enable DNS support"}
+            ]
+        },
+        priority_level=5,
+        blocking=True
+    )
+        """
             try:
                 previous_state = get_current_state()
                 tool_response = None
@@ -124,7 +104,7 @@ class GeneratorStageHandoffManager:
                 
                 if previous_state and "agent_workspaces" in previous_state:
                     resource_workspace = previous_state["agent_workspaces"].get(active_agent, {})
-                    discovered_dependencies = resource_workspace.get("discovered_dependencies", [])
+                    discovered_dependencies = resource_workspace.get("pending_dependencies", [])
                     handoff_recommendations = resource_workspace.get("handoff_recommendations", [])
                 # if active_agent == "resource_configuration_agent":
                 #     resource_generator_tool_msg = None
@@ -294,6 +274,18 @@ class GeneratorStageHandoffManager:
                         }
                     }
                 )
+                update_current_state({
+                    "active_agent": target_agent,
+                    "agent_status_matrix": updated_status_matrix,
+                    "pending_dependencies": updated_pending_deps,
+                    "dependency_graph": updated_dep_graph,
+                    "handoff_queue": [
+                        *state.get("handoff_queue", []),
+                        dependency_request
+                    ]
+
+                })
+
                 return Command(
                     goto=target_agent,
                     update={
@@ -567,15 +559,25 @@ class GeneratorStageHandoffManager:
 ## Completion and Resolution Handoff
 
 def create_completion_handoff_tool(source_agent: str):
-    """Tool for agents to signal completion and resolve dependencies"""
+    """Tool for agents to signal completion and resolve dependencies
+    
+    This generic completion tool is used by all agents in the swarm network to:
+    - Signal completion of their specific task
+    - Pass generated artifacts and results as completion_data
+    
+    For completion_data parameter:
+    - Resource Configuration Agent: Pass generated_resources list
+    - Variable Definition Agent: Pass terraform_variables list  
+    - Data Source Agent: Pass generated_data_sources list
+    - Local Values Agent: Pass generated_locals list
+    - Output Definition Agent: Pass generated_outputs list
+    """
     
     logger = AgentLogger("GeneratorStageHandoffManager")
     
     @tool(f"{source_agent}_complete_task", description=f"Signal completion of {source_agent}'s task")
     def completion_handoff_tool(
-        completion_data: Annotated[Dict[str, Any], "Generated artifacts and results"],
-        resolved_dependencies: Annotated[List[str], "List of dependency IDs resolved"],
-        next_recommendations: Annotated[List[str], "Recommended next agents to activate"],
+        completion_data: Annotated[Dict[str, Any], "Generated artifacts and results - pass the appropriate generated list from your tool response (e.g., terraform_variables, generated_resources, generated_data_sources, etc.)"],
         state: Annotated[Any, InjectedState],
         tool_call_id: Annotated[str, InjectedToolCallId]
     ) -> Command:
@@ -585,41 +587,38 @@ def create_completion_handoff_tool(source_agent: str):
                 message="Processing task completion",
                 extra={
                     "source_agent": source_agent,
-                    "resolved_dependencies_count": len(resolved_dependencies),
-                    "next_recommendations": next_recommendations,
                     "completion_data_keys": list(completion_data.keys()) if completion_data else []
                 }
             )
-        
+            global_state = get_current_state()
             # Update agent status to completed (defensive handling for missing keys)
-            current_status_matrix = state.get("agent_status_matrix", {})
+            current_status_matrix = global_state.get("agent_status_matrix", {})
             updated_status_matrix = {
                 **current_status_matrix,
                 source_agent: GeneratorAgentStatus.COMPLETED
             }
             
             # Move resolved dependencies from pending to resolved (defensive handling)
-            current_resolved_deps = state.get("resolved_dependencies", {})
+            current_resolved_deps = global_state.get("resolved_dependencies", {})
             updated_resolved_deps = {
                 **current_resolved_deps,
                 source_agent: [
-                    *current_resolved_deps.get(source_agent, []),
-                    *resolved_dependencies
+                    *current_resolved_deps.get(source_agent, [])
                 ]
             }
             
             # Remove resolved dependencies from pending (defensive handling)
-            current_pending_deps = state.get("pending_dependencies", {})
+            current_pending_deps = global_state.get("pending_dependencies", {})
             updated_pending_deps = {}
             for agent, deps in current_pending_deps.items():
                 remaining_deps = [
                     dep for dep in deps 
-                    if dep["id"] not in resolved_dependencies
+                    if dep["id"] not in [resolved_dep["id"] for resolved_dep in updated_resolved_deps.get(agent, [])]
                 ]
                 updated_pending_deps[agent] = remaining_deps
             
             # Update agent workspace with completion data (defensive handling)
-            current_workspaces = state.get("agent_workspaces", {})
+            current_workspaces = global_state.get("agent_workspaces", {})
             updated_workspaces = {
                 **current_workspaces,
                 source_agent: {
@@ -631,7 +630,7 @@ def create_completion_handoff_tool(source_agent: str):
             }
             
             # Update progress (defensive handling)
-            current_progress = state.get("planning_progress", {})
+            current_progress = global_state.get("planning_progress", {})
             updated_progress = {
                 **current_progress,
                 source_agent: 1.0
@@ -640,14 +639,14 @@ def create_completion_handoff_tool(source_agent: str):
             # Determine next agent based on recommendations and dependencies
             controller = GeneratorStageController()
             next_agent = controller.determine_next_active_agent({
-                **state,
+                **global_state,
                 "agent_status_matrix": updated_status_matrix,
                 "pending_dependencies": updated_pending_deps
             })
             
             # Check if stage is complete
             stage_complete = controller.check_stage_completion_conditions({
-                **state,
+                **global_state,
                 "agent_status_matrix": updated_status_matrix,
                 "pending_dependencies": updated_pending_deps,
                 "planning_progress": updated_progress
@@ -666,7 +665,7 @@ def create_completion_handoff_tool(source_agent: str):
                     extra={
                         "source_agent": source_agent,
                         "next_action": "check_planning_stage_completion",
-                        "resolved_deps_count": len(resolved_dependencies)
+                        "resolved_deps_count": len(updated_resolved_deps)
                     }
                 )
                 
@@ -701,22 +700,38 @@ def create_completion_handoff_tool(source_agent: str):
                     extra={
                         "source_agent": source_agent,
                         "next_agent": next_agent,
-                        "resolved_deps_count": len(resolved_dependencies),
+                        "resolved_deps_count": len(updated_resolved_deps),
                         "stage_complete": False
                     }
                 )
                 
                 # Create ToolMessage and return Command
                 completion_tool_message = ToolMessage(
-                    content=f"Task completion for {source_agent} - Transitioning to {next_agent}",
+                    content=f"Task completion for {source_agent} - Transitioning to {next_agent}. Generated artifacts: {list(completion_data.keys()) if completion_data else 'None'}. Resolved dependencies: {len(updated_resolved_deps.get(source_agent, []))} items.",
                     name=f"{source_agent}_complete_task",
                     tool_call_id=tool_call_id,
                     metadata={
                         "completion_type": "agent_transition",
-                        "next_destination": next_agent
+                        "next_destination": next_agent,
+                        "source_agent": source_agent,
+                        "completion_data_keys_of_source_agent": list(completion_data.keys()) if completion_data else [],
+                        "resolved_dependencies_count_of_source_agent": len(updated_resolved_deps.get(source_agent, [])),
+                        "stage_complete": stage_complete
                     }
                 )
                 
+                update_current_state({
+                    "active_agent": next_agent,
+                    "agent_status_matrix": {
+                        **updated_status_matrix,
+                        next_agent: GeneratorAgentStatus.ACTIVE
+                    },
+                    "resolved_dependencies": updated_resolved_deps,
+                    "pending_dependencies": updated_pending_deps,
+                    "agent_workspaces": updated_workspaces,
+                    "planning_progress": updated_progress
+                })
+
                 return Command(
                     goto=next_agent,
                     update={

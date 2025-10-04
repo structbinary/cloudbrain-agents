@@ -15,6 +15,7 @@ from aws_orchestrator_agent.core.llm.llm_provider import LLMProvider
 from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
+from ..global_state import get_current_state, set_current_state, update_agent_workspace, update_current_state
 from .data_generator_prompts import DATA_SOURCE_AGENT_SYSTEM_PROMPT, DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE
 
 # Create agent logger for data source generator
@@ -196,6 +197,7 @@ class TerraformDataSourceGenerationResponse(BaseModel):
     
     # Generation results
     generated_data_sources: List[TerraformDataSourceBlock] = Field(..., description="Successfully generated data source blocks")
+    complete_data_sources_file: str = Field(..., description="Complete data.tf file content")
     discovered_dependencies: List[DiscoveredDataDependency] = Field(default_factory=list, description="Dependencies requiring handoffs")
     
     # Agent coordination
@@ -228,18 +230,14 @@ class TerraformDataSourceGenerationResponse(BaseModel):
 
 @tool("generate_terraform_data_sources")
 def generate_terraform_data_sources(
-    execution_plan_data: dict = None,
-    agent_workspace: dict = None,
-    planning_context: dict = None
+    state: Annotated[Any, InjectedState] = None,
 ) -> TerraformDataSourceGenerationResponse:
     """
     Generate Terraform AWS data source blocks from execution plan specifications and agent requests.
     
     Args:
-        execution_plan_data: Execution plan data containing data source requirements
-        agent_workspace: Agent workspace data for the data source agent
-        planning_context: Planning context with generation requirements
-
+        state: GeneratorSwarmState containing all the data (execution_plan_data, agent_workspaces, planning_context)
+               
     This tool analyzes external infrastructure reference needs, generates HCL blocks, 
     identifies dependencies, and provides handoff recommendations to other agents. It supports
     both planner specifications and dynamic agent communication.
@@ -247,11 +245,30 @@ def generate_terraform_data_sources(
     
     try:
         start_time = datetime.now()
+
+        last_3_messages = state.get('messages', [])[-3:]
+    
+        # Check last 3 messages for ToolMessage types and extract state updates from model_extra
+        tool_message_analysis = {}
+        for i, msg in enumerate(last_3_messages):
+            if isinstance(msg, ToolMessage):
+                # Extract model_extra field
+                model_extra = None
+                if hasattr(msg, 'model_extra') and msg.model_extra:
+                    model_extra = msg.model_extra
+                elif hasattr(msg, 'additional_kwargs') and msg.additional_kwargs:
+                    model_extra = msg.additional_kwargs.get('model_extra')
+                
+                if model_extra:
+                    tool_message_analysis[f'message_{i}'] = model_extra
+
+        # Get current state
+        current_state = get_current_state()
         
-        # Use provided parameters or defaults
-        execution_plan_data = execution_plan_data or {}
-        agent_workspace = agent_workspace or {}
-        planning_context = planning_context or {}
+        # Extract data from state
+        execution_plan_data = current_state.get('execution_plan_data', {})
+        agent_workspace = current_state.get('agent_workspaces', {}).get('data_source_agent', {})
+        planning_context = current_state.get('planning_context', {})
         
         # Extract data from parameters
         data_source_requirements = execution_plan_data.get('data_source_requirements', [])
@@ -320,9 +337,10 @@ def generate_terraform_data_sources(
                 }
             )
             
+            # Use higher model for data source generation
             model = LLMProvider.create_llm(
                 provider=llm_config['provider'],
-                model=llm_config['model'],
+                model=llm_config.get('model_high', llm_config['model']),  # Fallback to regular model
                 temperature=llm_config['temperature'],
                 max_tokens=llm_config['max_tokens']
             )
@@ -377,6 +395,30 @@ def generate_terraform_data_sources(
             start_time
         )
         
+        # Update agent workspace with specific fields like variable generator
+        update_agent_workspace(
+            "data_source_agent", {
+                "complete_data_sources_file": enhanced_response.complete_data_sources_file,
+                "handoff_recommendations": enhanced_response.handoff_recommendations,
+                **enhanced_response.workspace_updates  # Include all workspace_updates
+            }
+        )
+        
+        # Handle resolved dependencies like variable generator
+        resolved_dependencies = current_state.get("pending_dependencies", {}).get("data_source_agent", [])
+        # Get current resolved dependencies and append new ones
+        current_resolved_deps = get_current_state().get("resolved_dependencies", {})
+        updated_resolved_deps = {
+            **current_resolved_deps,
+            "data_source_agent": [
+                *current_resolved_deps.get("data_source_agent", []),
+                *resolved_dependencies
+            ]
+        }
+        update_current_state({
+            "resolved_dependencies": updated_resolved_deps
+        })
+        
         data_generator_logger.log_structured(
             level="INFO",
             message="Terraform data source generation completed successfully",
@@ -389,10 +431,10 @@ def generate_terraform_data_sources(
             }
         )
         
-        return enhanced_response
-        
+        # Return only state_updates as JSON for LangGraph state management
+        return enhanced_response.state_updates
+
     except Exception as e:
-        generator_state = agent_workspace.get('generator_state', {})
         data_generator_logger.log_structured(
             level="ERROR",
             message="Terraform data source generation failed",
@@ -496,7 +538,36 @@ def post_process_data_source_response(
         llm_response.completion_status
     )
     
+    # Generate complete data sources file
+    llm_response.complete_data_sources_file = generate_complete_data_sources_file(validated_data_sources)
+    
     return llm_response
+
+def generate_complete_data_sources_file(data_sources: List[TerraformDataSourceBlock]) -> str:
+    """Generate complete data.tf file content from data sources"""
+    if not data_sources:
+        return ""
+    
+    # Generate file header
+    file_content = "# Data Sources\n"
+    file_content += "# This file contains all data source lookups for the infrastructure\n\n"
+    
+    # Group data sources by type for better organization
+    data_sources_by_type = {}
+    for data_source in data_sources:
+        data_source_type = data_source.data_source_type
+        if data_source_type not in data_sources_by_type:
+            data_sources_by_type[data_source_type] = []
+        data_sources_by_type[data_source_type].append(data_source)
+    
+    # Generate content grouped by type
+    for data_source_type, sources in data_sources_by_type.items():
+        file_content += f"# {data_source_type.replace('_', ' ').title()} Data Sources\n"
+        for data_source in sources:
+            file_content += f"{data_source.hcl_block}\n"
+        file_content += "\n"
+    
+    return file_content.strip()
 
 def validate_terraform_data_source(data_source: TerraformDataSourceBlock) -> Dict[str, Any]:
     """Validate individual Terraform data source"""
