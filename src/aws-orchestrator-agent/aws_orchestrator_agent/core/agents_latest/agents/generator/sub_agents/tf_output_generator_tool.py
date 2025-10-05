@@ -345,7 +345,7 @@ def generate_terraform_outputs(
 
         
         if tool_message_analysis:
-            agent_workspaces = tool_message_analysis.get("agent_workspaces", {}).get("variable_definition_agent", {})
+            agent_workspaces = tool_message_analysis.get("agent_workspaces", {}).get("output_definition_agent", {})
         else:
             agent_workspaces = {}
         
@@ -403,7 +403,6 @@ def generate_terraform_outputs(
             workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
             workspace_generated_local_values=escape_json_for_template(generated_local_values),
             workspace_generated_resources=escape_json_for_template(generated_resources),
-            specific_requirements_patterns=extract_specific_requirements(generation_context),
             handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
         )
         # Create parser for structured output
@@ -443,7 +442,7 @@ def generate_terraform_outputs(
             llm_higher_config = config_instance.get_llm_higher_config()
             model_higher = LLMProvider.create_llm(
                 provider=llm_higher_config['provider'],
-                model=llm_higher_config.get('model_high', llm_higher_config['model']),  # Fallback to regular model
+                model=llm_higher_config.get('model_high'),  # Fallback to regular model
                 temperature=llm_higher_config['temperature'],
                 max_tokens=llm_higher_config['max_tokens']
             )

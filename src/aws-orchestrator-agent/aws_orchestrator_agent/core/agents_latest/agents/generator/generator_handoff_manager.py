@@ -638,19 +638,25 @@ def create_completion_handoff_tool(source_agent: str):
             
             # Determine next agent based on recommendations and dependencies
             controller = GeneratorStageController()
-            next_agent = controller.determine_next_active_agent({
-                **global_state,
-                "agent_status_matrix": updated_status_matrix,
-                "pending_dependencies": updated_pending_deps
-            })
+            # Extract only the required fields to avoid conflicts with old agent_status_matrix
+            planning_progress = global_state.get("planning_progress", {})
+            dependency_graph = global_state.get("dependency_graph", {})
+            active_agent = global_state.get("active_agent")
+            agent_waiting_times = global_state.get("agent_waiting_times", {})
+            
+            next_agent = controller.determine_next_active_agent_from_params(
+                agent_status_matrix=updated_status_matrix,  # Use updated status matrix
+                dependency_graph=dependency_graph,
+                active_agent=active_agent,
+                agent_waiting_times=agent_waiting_times
+            )
             
             # Check if stage is complete
-            stage_complete = controller.check_stage_completion_conditions({
-                **global_state,
-                "agent_status_matrix": updated_status_matrix,
-                "pending_dependencies": updated_pending_deps,
-                "planning_progress": updated_progress
-            })
+            stage_complete = controller.check_stage_completion_conditions_from_params(
+                agent_status_matrix=updated_status_matrix,  # Use updated status matrix
+                planning_progress=updated_progress,
+                pending_dependencies=updated_pending_deps
+            )
 
             tool_message = ToolMessage(
                 content=f"Completion handoff to {source_agent}",
@@ -719,7 +725,7 @@ def create_completion_handoff_tool(source_agent: str):
                         "stage_complete": stage_complete
                     }
                 )
-                
+
                 update_current_state({
                     "active_agent": next_agent,
                     "agent_status_matrix": {
@@ -730,7 +736,7 @@ def create_completion_handoff_tool(source_agent: str):
                     "pending_dependencies": updated_pending_deps,
                     "agent_workspaces": updated_workspaces,
                     "planning_progress": updated_progress
-                })
+                })  
 
                 return Command(
                     goto=next_agent,

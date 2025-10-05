@@ -16,7 +16,7 @@ from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
 from ..global_state import get_current_state, set_current_state, update_agent_workspace, update_current_state
-from .local_generator_prompts import LOCAL_VALUES_AGENT_SYSTEM_PROMPT, LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE
+from .local_generator_prompts import LOCAL_VALUES_AGENT_SYSTEM_PROMPT, LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE, LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE_REFINED
 
 # Create agent logger for local values generator
 local_generator_logger = AgentLogger("LOCAL_GENERATOR")
@@ -348,12 +348,12 @@ def generate_terraform_locals(
             """Escape curly braces in JSON strings for template compatibility"""
             return json_str.replace('{', '{{').replace('}', '}}')
         
-        formatted_user_prompt = LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE.format(
+        formatted_user_prompt = LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE_REFINED.format(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
-            local_value_requirements=escape_json_for_template(json.dumps(local_value_requirements, indent=2)),
+            local_value_specifications=escape_json_for_template(json.dumps(local_value_requirements, indent=2)),
             planning_resources=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
             planning_variables=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
             planning_data_sources=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
@@ -570,6 +570,9 @@ def post_process_local_values_response(
     # Generate complete locals block
     llm_response.complete_locals_block = generate_complete_locals_block(validated_locals)
     
+    # Update metrics with actual counts
+    update_generation_metrics(llm_response.generation_metadata, validated_locals)
+    
     # Enhance dependencies with additional context
     enhanced_dependencies = enhance_local_value_dependencies(
         llm_response.discovered_dependencies, 
@@ -630,6 +633,42 @@ def generate_complete_locals_file(locals: List[TerraformLocalValue]) -> str:
     file_content += "}\n"
     
     return file_content.strip()
+
+def update_generation_metrics(
+    metrics: LocalValueGenerationMetrics,
+    locals: List[TerraformLocalValue]
+) -> None:
+    """Update metrics with actual generated local value data"""
+    
+    # Update type counts
+    for local_val in locals:
+        metrics.local_type_counts[local_val.local_type] = (
+            metrics.local_type_counts.get(local_val.local_type, 0) + 1
+        )
+    
+    # Update complexity distribution
+    for local_val in locals:
+        metrics.complexity_distribution[local_val.complexity_level] = (
+            metrics.complexity_distribution.get(local_val.complexity_level, 0) + 1
+        )
+    
+    # Update function usage statistics
+    all_functions = []
+    for local_val in locals:
+        if hasattr(local_val, 'functions_used') and local_val.functions_used:
+            all_functions.extend(local_val.functions_used)
+    
+    metrics.total_functions_used = len(all_functions)
+    metrics.unique_functions_used = list(set(all_functions))
+    
+    # Update dependency statistics
+    for local_val in locals:
+        if hasattr(local_val, 'variable_dependencies') and local_val.variable_dependencies:
+            metrics.variable_dependencies += len(local_val.variable_dependencies)
+        if hasattr(local_val, 'resource_dependencies') and local_val.resource_dependencies:
+            metrics.resource_dependencies += len(local_val.resource_dependencies)
+        if hasattr(local_val, 'data_source_dependencies') and local_val.data_source_dependencies:
+            metrics.data_source_dependencies += len(local_val.data_source_dependencies)
 
 def validate_terraform_local_value(local_value: TerraformLocalValue) -> Dict[str, Any]:
     """Validate individual Terraform local value"""

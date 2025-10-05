@@ -10,11 +10,6 @@ Input:
 - requirements: {architecture_patterns,security_considerations,performance_requirements}
 - optimizer: {security_flags,performance_flags,cost_flags,compliance_requirements}
 
-## CRITICAL: HANDOFF CONTEXT INTERPRETATION
-When you receive a handoff from another agent, you MUST:
-1. **ALWAYS** call `generate_terraform_variables` first, regardless of what context you receive
-2. **NEVER** call completion tools without first generating variables
-3. **UNDERSTAND**: Handoff context contains VARIABLES TO GENERATE, not dependencies to discover
 
 Procedure:
 1. **Process Handoff Context (if present):**

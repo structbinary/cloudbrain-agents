@@ -118,12 +118,20 @@ class GeneratorSwarmAgent(BaseSubgraphAgent):
         
         # Initialize the LLM model using the centralized provider
         try:
+            # self.model = LLMProvider.create_llm(
+            #     provider=llm_config['provider'],
+            #     model=llm_config['model'],
+            #     temperature=llm_config['temperature'],
+            #     max_tokens=llm_config['max_tokens']
+            # )
+            llm_higher_config = self.config_instance.get_llm_higher_config()
             self.model = LLMProvider.create_llm(
-                provider=llm_config['provider'],
-                model=llm_config['model'],
-                temperature=llm_config['temperature'],
-                max_tokens=llm_config['max_tokens']
+                provider=llm_higher_config['provider'],
+                model=llm_higher_config['model'],
+                temperature=llm_higher_config['temperature'],
+                max_tokens=llm_higher_config['max_tokens']
             )
+
             generator_swarm_logger.log_structured(
                 level="INFO",
                 message="LLM model initialized successfully",

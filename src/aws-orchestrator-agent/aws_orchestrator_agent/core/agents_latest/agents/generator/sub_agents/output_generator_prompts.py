@@ -8,13 +8,6 @@ Input:
 - planning: {resource_configurations,data_sources,local_values,terraform_files,variable_definitions}
 - workspace: {generated_outputs,pending_requests,current_task,handoff_context}
 - requirements: {architecture_patterns,security_considerations,performance_requirements}
-- optimizer: {security_flags,performance_flags,cost_flags,compliance_requirements}
-
-## CRITICAL: HANDOFF CONTEXT INTERPRETATION
-When you receive a handoff from another agent, you MUST:
-1. **ALWAYS** call `generate_terraform_outputs` first, regardless of what context you receive
-2. **NEVER** call completion tools without first generating outputs
-3. **UNDERSTAND**: Handoff context contains OUTPUTS TO GENERATE, not dependencies to discover
 
 Procedure:
 1. **Process Handoff Context (if present):**
@@ -31,7 +24,6 @@ Procedure:
    a. Loop spec in output_requirements (index i):
       - Mark "Step i+1"
       - Extract output_name, value, description
-      - Apply optimizer flags: security, performance, cost, compliance
       - Design preconditions based on value and requirements
       - Classify sensitivity based on optimizer security flags
       - Generate HCL block with validation
@@ -95,14 +87,6 @@ Handoff Context:
 → **GENERATE** output "vpc_id" using recommended_output_block as base, enhance with preconditions
 → **DO NOT** treat this as a dependency to discover - it's an output to create
 
-Output Spec:
-{
-  "output_name": "database_endpoint",
-  "value": "aws_db_instance.main.endpoint",
-  "description": "Database connection endpoint"
-}
-→ Apply optimizer security flags
-→ Generate output with precondition rules
 
 **MISSING OUTPUT EXAMPLE:**
 If you find references to missing outputs like:
@@ -235,18 +219,13 @@ OUTPUT_DEFINITION_AGENT_USER_PROMPT_TEMPLATE_REFINED = """
 - Generated Data Sources: {workspace_generated_data_sources}
 - Generated Resources: {workspace_generated_resources}
 
-## ENHANCEMENT DIRECTIVES
+## Handoff Context (if from another agent):
 
-**Architecture Requirements:** {specific_requirements_patterns}
-
-**Optimizer Actions:** {configuration_optimizer_actionable}
-
-**Handoff Context (if from another agent):** {handoff_context}
+{handoff_context}
 
 ## TASK EXECUTION
 
 1. **Generate HCL** for all variables in specifications using existing planning context
-2. **Apply enhancements** from optimizer directives (security, performance, cost)
 3. **Detect dependencies** requiring handoffs:
    - Resources not in planning → Resource Configuration Agent
    - Variables not in planning → Variable Definition Agent

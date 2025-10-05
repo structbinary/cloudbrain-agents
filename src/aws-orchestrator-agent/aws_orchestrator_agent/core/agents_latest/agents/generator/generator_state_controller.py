@@ -29,7 +29,8 @@ class GeneratorStageController:
                     "resource_configuration_agent": 0.0,
                     "variable_definition_agent": 0.0,
                     "data_source_agent": 0.0,
-                    "local_values_agent": 0.0
+                    "local_values_agent": 0.0,
+                    "output_definition_agent": 0.0
                 }
             },
             graph=Command.PARENT
@@ -46,12 +47,35 @@ class GeneratorStageController:
             "resource_configuration_agent": 0.4,  # Most critical
             "variable_definition_agent": 0.3,
             "data_source_agent": 0.2,
-            "local_values_agent": 0.1
+            "local_values_agent": 0.05,
+            "output_definition_agent": 0.05
         }
         
         weighted_sum = sum(
             weights.get(agent, 0.25) * progress 
             for agent, progress in state["planning_progress"].items()
+        )
+        
+        return min(weighted_sum, 1.0)
+    
+    def calculate_stage_completion_from_params(self, planning_progress: dict) -> float:
+        """Parameterized version of calculate_stage_completion"""
+        progress_values = list(planning_progress.values())
+        if not progress_values:
+            return 0.0
+            
+        # Weighted completion based on criticality
+        weights = {
+            "resource_configuration_agent": 0.4,  # Most critical
+            "variable_definition_agent": 0.3,
+            "data_source_agent": 0.2,
+            "local_values_agent": 0.05,
+            "output_definition_agent": 0.05
+        }
+        
+        weighted_sum = sum(
+            weights.get(agent, 0.25) * progress 
+            for agent, progress in planning_progress.items()
         )
         
         return min(weighted_sum, 1.0)
@@ -63,7 +87,8 @@ class GeneratorStageController:
             "resource_configuration_agent",
             "variable_definition_agent", 
             "data_source_agent",
-            "local_values_agent"
+            "local_values_agent",
+            "output_definition_agent"
         ]
         
         agents_completed = all(
@@ -83,6 +108,43 @@ class GeneratorStageController:
         no_error_agents = all(
             status != GeneratorAgentStatus.ERROR 
             for status in state["agent_status_matrix"].values()
+        )
+        
+        return agents_completed and no_pending_deps and completion_threshold_met and no_error_agents
+    
+    def check_stage_completion_conditions_from_params(
+        self, 
+        agent_status_matrix: dict,
+        planning_progress: dict,
+        pending_dependencies: dict
+    ) -> bool:
+        """Parameterized version of check_stage_completion_conditions"""
+        # Check 1: All agents must be completed
+        required_agents = [
+            "resource_configuration_agent",
+            "variable_definition_agent", 
+            "data_source_agent",
+            "local_values_agent",
+            "output_definition_agent"
+        ]
+        
+        agents_completed = all(
+            agent_status_matrix.get(agent) == GeneratorAgentStatus.COMPLETED
+            for agent in required_agents
+        )
+        
+        # Check 2: No pending dependencies
+        no_pending_deps = all(
+            len(deps) == 0 for deps in pending_dependencies.values()
+        )
+        
+        # Check 3: Overall completion threshold met
+        completion_threshold_met = self.calculate_stage_completion_from_params(planning_progress) >= self.completion_threshold
+        
+        # Check 4: No agents in error state (unless recovered)
+        no_error_agents = all(
+            status != GeneratorAgentStatus.ERROR 
+            for status in agent_status_matrix.values()
         )
         
         return agents_completed and no_pending_deps and completion_threshold_met and no_error_agents
@@ -225,12 +287,98 @@ class GeneratorStageController:
             # Fallback to safe default
             return "resource_configuration_agent"
     
+    def determine_next_active_agent_from_params(
+        self, 
+        agent_status_matrix: dict,
+        dependency_graph: dict,
+        active_agent: str = None,
+        agent_waiting_times: dict = None
+    ) -> str:
+        """Parameterized version of determine_next_active_agent for handoff tools"""
+        try:
+            if agent_waiting_times is None:
+                agent_waiting_times = {}
+                
+            # Priority 1: Agents with resolved dependencies
+            ready_agents = []
+            for agent, status in agent_status_matrix.items():
+                if status in [GeneratorAgentStatus.INACTIVE, GeneratorAgentStatus.WAITING]:
+                    dependencies_met = self.check_agent_dependencies_met_from_params(
+                        agent, agent_status_matrix, dependency_graph
+                    )
+                    if dependencies_met:
+                        priority = self.get_agent_priority_from_params(
+                            agent, agent_waiting_times
+                        )
+                        ready_agents.append((agent, priority))
+            
+            if ready_agents:
+                # Return highest priority agent
+                selected_agent = max(ready_agents, key=lambda x: x[1])[0]
+                self.logger.log_structured(
+                    level="DEBUG",
+                    message="Selected next agent from ready agents (parameterized)",
+                    extra={
+                        "selected_agent": selected_agent,
+                        "ready_agents_count": len(ready_agents),
+                        "ready_agents": [agent for agent, _ in ready_agents]
+                    }
+                )
+                return selected_agent
+            
+            # Priority 2: Currently active agent (continue execution)
+            if (active_agent and 
+                agent_status_matrix.get(active_agent) == GeneratorAgentStatus.ACTIVE):
+                self.logger.log_structured(
+                    level="DEBUG",
+                    message="Continuing with current active agent (parameterized)",
+                    extra={"current_agent": active_agent}
+                )
+                return active_agent
+                
+            # Priority 3: Default to Resource Configuration Agent
+            self.logger.log_structured(
+                level="DEBUG",
+                message="Defaulting to resource_configuration_agent (parameterized)",
+                extra={"reason": "no_ready_agents_or_active_agent"}
+            )
+            return "resource_configuration_agent"
+            
+        except Exception as e:
+            self.logger.log_structured(
+                level="ERROR",
+                message="Error in determine_next_active_agent_from_params",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "fallback_agent": "resource_configuration_agent"
+                }
+            )
+            # Fallback to safe default
+            return "resource_configuration_agent"
+    
     def check_agent_dependencies_met(self, agent_name: str, state: GeneratorSwarmState) -> bool:
         """Check if agent's dependencies are satisfied"""
         required_deps = state["dependency_graph"].get(agent_name, set())
         
         for dep_agent in required_deps:
             dep_status = state["agent_status_matrix"].get(dep_agent)
+            if dep_status != GeneratorAgentStatus.COMPLETED:
+                return False
+                
+        return True
+    
+    def check_agent_dependencies_met_from_params(
+        self, 
+        agent_name: str, 
+        agent_status_matrix: dict, 
+        dependency_graph: dict
+    ) -> bool:
+        """Parameterized version of check_agent_dependencies_met"""
+        required_deps = dependency_graph.get(agent_name, set())
+        
+        for dep_agent in required_deps:
+            dep_status = agent_status_matrix.get(dep_agent)
             if dep_status != GeneratorAgentStatus.COMPLETED:
                 return False
                 
@@ -244,7 +392,8 @@ class GeneratorStageController:
                 "resource_configuration_agent": 4,  # Highest priority
                 "variable_definition_agent": 3,
                 "data_source_agent": 2,
-                "local_values_agent": 1
+                "local_values_agent": 1,
+                "output_definition_agent": 1
             }
             
             base_priority = priority_weights.get(agent_name, 0)
@@ -273,6 +422,54 @@ class GeneratorStageController:
             self.logger.log_structured(
                 level="ERROR",
                 message="Error calculating priority for agent",
+                extra={
+                    "agent_name": agent_name,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "fallback_priority": 1
+                }
+            )
+            # Return default priority for unknown agents
+            return 1
+    
+    def get_agent_priority_from_params(self, agent_name: str, agent_waiting_times: dict) -> int:
+        """Parameterized version of get_agent_priority"""
+        try:
+            # Define priority weights (higher = more important)
+            priority_weights = {
+                "resource_configuration_agent": 4,  # Highest priority
+                "variable_definition_agent": 3,
+                "data_source_agent": 2,
+                "local_values_agent": 1,
+                "output_definition_agent": 1
+            }
+            
+            base_priority = priority_weights.get(agent_name, 0)
+            
+            # Boost priority if agent has been waiting longer
+            # This helps prevent starvation of lower-priority agents
+            waiting_time = agent_waiting_times.get(agent_name, 0)
+            time_boost = min(waiting_time // 60, 2)  # Max 2 point boost for waiting 1+ minutes
+            
+            total_priority = base_priority + time_boost
+            self.logger.log_structured(
+                level="DEBUG",
+                message="Calculated agent priority (parameterized)",
+                extra={
+                    "agent_name": agent_name,
+                    "base_priority": base_priority,
+                    "time_boost": time_boost,
+                    "total_priority": total_priority,
+                    "waiting_time": waiting_time
+                }
+            )
+            
+            return total_priority
+            
+        except Exception as e:
+            self.logger.log_structured(
+                level="ERROR",
+                message="Error calculating priority for agent (parameterized)",
                 extra={
                     "agent_name": agent_name,
                     "error": str(e),

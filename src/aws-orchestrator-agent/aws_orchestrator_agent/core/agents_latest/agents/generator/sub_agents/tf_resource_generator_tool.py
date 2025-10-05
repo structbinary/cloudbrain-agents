@@ -18,6 +18,7 @@ from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
 from .resource_generator_prompts import RESOURCE_CONFIGURATION_USER_PROMPT_TEMPLATE, RESOURCE_CONFIGURATION_SYSTEM_PROMPT, RESOURCE_CONFIGURATION_USER_PROMPT_TEMPLATE_REFINED
 from ..global_state import get_current_state, update_agent_workspace, update_current_state
+from ..tf_content_compressor import TerraformDataCompressor
 # Create agent logger for resource generator
 resource_generator_logger = AgentLogger("RESOURCE_GENERATOR")
 
@@ -352,7 +353,58 @@ def generate_terraform_resources(
         exec_plan = generation_context.get('execution_plan', {})
         workspace = agent_workspace
         
-        # Format user prompt with actual data, escaping curly braces in JSON
+        # Use TerraformDataCompressor for efficient data compression
+        compressor = TerraformDataCompressor()
+        
+        # Log original data sizes for comparison
+        original_sizes = {
+            'resource_specifications': len(json.dumps(planning_resource_specifications)),
+            'variable_definitions': len(json.dumps(planning_variable_definitions)),
+            'local_values': len(json.dumps(planning_local_values)),
+            'data_sources': len(json.dumps(planning_data_sources)),
+            'output_definitions': len(json.dumps(planning_output_definitions)),
+            'terraform_files': len(json.dumps(planning_terraform_files)),
+            'generated_resources': len(generated_resources),
+            'generated_variables': len(generated_variables),
+            'generated_data_sources': len(generated_data_sources),
+            'generated_local_values': len(generated_local_values),
+            'generated_outputs': len(generated_output_definitions)
+        }
+        
+        compressed_data = compressor.compress_all_planning_data(
+            planning_resource_specifications,
+            planning_variable_definitions,
+            planning_local_values,
+            planning_data_sources,
+            planning_output_definitions,
+            planning_terraform_files,
+            generated_resources,
+            generated_variables,
+            generated_data_sources,
+            generated_local_values,
+            generated_output_definitions,
+            extract_configuration_optimizer_data(generation_context)
+        )
+        
+        # Log compression results
+        compressed_sizes = {key: len(value) for key, value in compressed_data.items()}
+        total_original = sum(original_sizes.values())
+        total_compressed = sum(compressed_sizes.values())
+        compression_ratio = (total_original - total_compressed) / total_original * 100 if total_original > 0 else 0
+        
+        resource_generator_logger.log_structured(
+            level="INFO",
+            message="Data compression completed successfully",
+            extra={
+                "original_total_chars": total_original,
+                "compressed_total_chars": total_compressed,
+                "compression_ratio_percent": round(compression_ratio, 2),
+                "original_sizes": original_sizes,
+                "compressed_sizes": compressed_sizes
+            }
+        )
+        
+        # Format user prompt with compressed data
         def escape_json_for_template(json_str):
             """Escape curly braces in JSON strings for template compatibility"""
             return json_str.replace('{', '{{').replace('}', '}}')
@@ -362,25 +414,25 @@ def generate_terraform_resources(
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
-            resource_specifications=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
-            planning_variable_definitions=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
-            planning_local_values=escape_json_for_template(json.dumps(planning_local_values, indent=2)),
-            planning_data_sources=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
-            planning_output_definitions=escape_json_for_template(json.dumps(planning_output_definitions, indent=2)),
-            planning_terraform_files=escape_json_for_template(json.dumps(planning_terraform_files, indent=2)),
+            resource_specifications=escape_json_for_template(compressed_data['resource_specifications']),
+            planning_variable_definitions=escape_json_for_template(compressed_data['variable_definitions']),
+            planning_local_values=escape_json_for_template(compressed_data['local_values']),
+            planning_data_sources=escape_json_for_template(compressed_data['data_sources']),
+            planning_output_definitions=escape_json_for_template(compressed_data['output_definitions']),
+            planning_terraform_files=escape_json_for_template(compressed_data['terraform_files']),
             current_stage=planning_context.get('current_stage', 'generation'),
             active_agent=agent_workspace.get('active_agent', 'resource_configuration_agent'),
-            workspace_generated_resources=escape_json_for_template(generated_resources),
-            workspace_generated_variables=escape_json_for_template(generated_variables),
-            workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
-            workspace_generated_local_values=escape_json_for_template(generated_local_values),
-            workspace_generated_outputs=escape_json_for_template(generated_output_definitions),
+            workspace_generated_resources=escape_json_for_template(compressed_data['workspace_generated_resources']),
+            workspace_generated_variables=escape_json_for_template(compressed_data['workspace_generated_variables']),
+            workspace_generated_data_sources=escape_json_for_template(compressed_data['workspace_generated_data_sources']),
+            workspace_generated_local_values=escape_json_for_template(compressed_data['workspace_generated_local_values']),
+            workspace_generated_outputs=escape_json_for_template(compressed_data['workspace_generated_outputs']),
             specific_requirements_patterns=extract_specific_requirements(generation_context),
-            configuration_optimizer_actionable=escape_json_for_template(json.dumps(extract_configuration_optimizer_data(generation_context), indent=2)),
+            configuration_optimizer_actionable=escape_json_for_template(compressed_data['optimizer_data']),
             handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
         ) 
         
-        # Create parser for structured output
+        # Create parser for structured output with lenient parsing
         parser = PydanticOutputParser(pydantic_object=TerraformResourceGenerationResponse)
         
         # Build complete prompt, escaping curly braces in system prompt
@@ -388,7 +440,16 @@ def generate_terraform_resources(
         prompt = ChatPromptTemplate.from_messages([
             ("system", escaped_system_prompt),
             ("user", formatted_user_prompt),
-            ("user", "Please respond with valid JSON matching the TerraformResourceGenerationResponse schema:\n{format_instructions}")
+            ("user", """Please respond with valid JSON matching the TerraformResourceGenerationResponse schema.
+
+IMPORTANT: 
+- Keep the JSON structure simple and valid
+- Use empty arrays [] for lists if no items
+- Use empty strings "" for optional string fields
+- Focus on generating the core resources first
+- You can return partial results if needed
+
+{format_instructions}""")
         ]).partial(format_instructions=parser.get_format_instructions())
         
         # Create and execute chain using centralized LLM
@@ -453,8 +514,55 @@ def generate_terraform_resources(
             }
         )
         
-        # Execute the chain
-        llm_response = chain.invoke({})
+        # Execute the chain with error handling
+        try:
+            llm_response = chain.invoke({})
+        except Exception as e:
+            resource_generator_logger.log_structured(
+                level="ERROR",
+                message="LLM chain execution failed, attempting fallback",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "generation_id": agent_workspace.get('generation_id', 'unknown')
+                }
+            )
+            
+            # Create fallback response
+            llm_response = TerraformResourceGenerationResponse(
+                generated_resources=[],
+                discovered_dependencies=[],
+                handoff_recommendations=[],
+                completion_status="error",
+                next_recommended_action="retry_with_simplified_prompt",
+                generation_metadata=ResourceGenerationMetrics(
+                    total_resources_generated=0,
+                    generation_duration_seconds=(datetime.now() - start_time).total_seconds(),
+                    dependencies_discovered=0,
+                    handoffs_required=0,
+                    validation_errors=[f"LLM execution failed: {str(e)}"]
+                ),
+                complete_resources_file="",
+                state_updates={
+                    'agent_status_matrix': {
+                        **agent_workspace.get('agent_status_matrix', {}),
+                        'resource_configuration_agent': 'error'
+                    }
+                },
+                workspace_updates={
+                    'error': str(e),
+                    'completion_status': 'error',
+                    'error_timestamp': datetime.now().isoformat()
+                },
+                critical_errors=[f"LLM execution failed: {str(e)}"],
+                checkpoint_data={
+                    'stage': 'planning',
+                    'agent': 'resource_configuration_agent',
+                    'checkpoint_type': 'llm_execution_error',
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                }
+            )
         
         resource_generator_logger.log_structured(
             level="DEBUG",

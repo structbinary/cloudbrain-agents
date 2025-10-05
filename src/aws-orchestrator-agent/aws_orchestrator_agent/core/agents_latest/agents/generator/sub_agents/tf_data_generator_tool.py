@@ -16,7 +16,7 @@ from aws_orchestrator_agent.config.config import Config
 from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
 from ..global_state import get_current_state, set_current_state, update_agent_workspace, update_current_state
-from .data_generator_prompts import DATA_SOURCE_AGENT_SYSTEM_PROMPT, DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE
+from .data_generator_prompts import DATA_SOURCE_AGENT_SYSTEM_PROMPT, DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE, DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE_REFINED
 
 # Create agent logger for data source generator
 data_generator_logger = AgentLogger("DATA_GENERATOR")
@@ -242,43 +242,102 @@ def generate_terraform_data_sources(
     identifies dependencies, and provides handoff recommendations to other agents. It supports
     both planner specifications and dynamic agent communication.
     """
+
+    start_time = datetime.now()
+
+    last_3_messages = state.get('messages', [])[-3:]
     
+    # Check last 3 messages for ToolMessage types and extract state updates from model_extra
+    tool_message_analysis = {}
+    for i, msg in enumerate(last_3_messages):
+        if isinstance(msg, ToolMessage):
+            # Extract model_extra field
+            model_extra = None
+            if hasattr(msg, 'model_extra') and msg.model_extra:
+                model_extra = msg.model_extra
+            elif hasattr(msg, 'additional_kwargs') and msg.additional_kwargs:
+                model_extra = msg.additional_kwargs.get('model_extra')
+            
+            # Extract state updates from model_extra if available
+            if (model_extra and 'metadata' in model_extra and 'state_updates' in model_extra['metadata'] 
+                and model_extra['metadata'].get('handoff_destination') == 'data_source_agent'):
+                state_updates = model_extra['metadata']['state_updates']
+                tool_message_analysis["agent_status_matrix"] = state_updates.get('agent_status_matrix')
+                tool_message_analysis["pending_dependencies"] = state_updates.get('pending_dependencies')
+                tool_message_analysis["dependency_graph"] = state_updates.get('dependency_graph')
+                tool_message_analysis["agent_workspaces"] = state_updates.get('agent_workspaces')
+                tool_message_analysis["handoff_queue"] = state_updates.get('handoff_queue')
+
+    data_generator_logger.log_structured(
+        level="INFO",
+        message="Last 3 messages ToolMessage state updates analysis",
+        extra={
+            "total_messages": len(last_3_messages),
+            "tool_message_count": len(tool_message_analysis)
+        }
+    )
+    previous_state = get_current_state()
+    if isinstance(previous_state, str):
+        try:
+            previous_state = json.loads(previous_state)
+        except json.JSONDecodeError as e:
+            previous_state = {}
+            data_generator_logger.log_structured(
+                level="ERROR",
+                message="Failed to parse previous state JSON",
+                extra={"error": str(e)})
+
     try:
-        start_time = datetime.now()
-
-        last_3_messages = state.get('messages', [])[-3:]
     
-        # Check last 3 messages for ToolMessage types and extract state updates from model_extra
-        tool_message_analysis = {}
-        for i, msg in enumerate(last_3_messages):
-            if isinstance(msg, ToolMessage):
-                # Extract model_extra field
-                model_extra = None
-                if hasattr(msg, 'model_extra') and msg.model_extra:
-                    model_extra = msg.model_extra
-                elif hasattr(msg, 'additional_kwargs') and msg.additional_kwargs:
-                    model_extra = msg.additional_kwargs.get('model_extra')
-                
-                if model_extra:
-                    tool_message_analysis[f'message_{i}'] = model_extra
+        execution_plan_data = previous_state.get("execution_plan_data", {})
+        planning_context = previous_state.get("planning_context", {})
+        generated_resources = previous_state.get("agent_workspaces", {}).get("resource_configuration_agent", {}).get("complete_resources_file", "")
+        generated_variables = previous_state.get("agent_workspaces", {}).get("variable_definition_agent", {}).get("complete_variables_file", "")
+        generated_data_sources = previous_state.get("agent_workspaces", {}).get("data_source_agent", {}).get("complete_data_sources_file", "")
+        generated_local_values = previous_state.get("agent_workspaces", {}).get("local_values_agent", {}).get("complete_locals_file", "")
+        generated_output_definitions = previous_state.get("agent_workspaces", {}).get("output_definition_agent", {}).get("complete_outputs_file", "")
+        if execution_plan_data:
+            planning_resource_specifications = execution_plan_data.get('execution_plans', [])[0].get('resource_configurations', [])
+            planning_variable_definitions = execution_plan_data.get('execution_plans', [])[0].get('variable_definitions', [])
+            planning_local_values = execution_plan_data.get('execution_plans', [])[0].get('local_values', [])
+            planning_data_sources = execution_plan_data.get('execution_plans', [])[0].get('data_sources', [])
+            planning_output_definitions = execution_plan_data.get('execution_plans', [])[0].get('output_definitions', [])
+            planning_terraform_files = execution_plan_data.get('execution_plans', [])[0].get('terraform_files', [])
+        else:
+            planning_resource_specifications = []
+            planning_variable_definitions = []
+            planning_local_values = []
+            planning_data_sources = []
+            planning_output_definitions = []
+            planning_terraform_files = []
 
-        # Get current state
-        current_state = get_current_state()
         
-        # Extract data from state
-        execution_plan_data = current_state.get('execution_plan_data', {})
-        agent_workspace = current_state.get('agent_workspaces', {}).get('data_source_agent', {})
-        planning_context = current_state.get('planning_context', {})
+        if tool_message_analysis:
+            agent_workspaces = tool_message_analysis.get("agent_workspaces", {}).get("data_source_agent", {})
+        else:
+            agent_workspaces = {}
         
-        # Extract data from parameters
-        data_source_requirements = execution_plan_data.get('data_source_requirements', [])
-        generation_context = planning_context or {}
+        # Extract the current task and context from the handoff
+        if agent_workspaces:
+            current_task = agent_workspaces.get("current_task", {})
+            handoff_context = agent_workspaces.get("context", {})
+            agent_workspace = {
+                "current_task": current_task,
+                "handoff_context": handoff_context
+            }
+        else:
+            agent_workspace = {
+                "current_task": {},
+                "handoff_context": {}
+            }
+
+        generation_context = planning_context
         
         data_generator_logger.log_structured(
             level="INFO",
             message="Starting Terraform data source generation",
             extra={
-                "data_source_requirements_count": len(data_source_requirements),
+                "data_source_requirements_count": len(planning_data_sources),
                 "generation_id": agent_workspace.get('generation_id', 'unknown'),
                 "current_stage": planning_context.get('current_stage', 'unknown'),
                 "active_agent": agent_workspace.get('active_agent', 'unknown')
@@ -294,19 +353,25 @@ def generate_terraform_data_sources(
             """Escape curly braces in JSON strings for template compatibility"""
             return json_str.replace('{', '{{').replace('}', '}}')
         
-        formatted_user_prompt = DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE.format(
+        formatted_user_prompt = DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE_REFINED.format(
             service_name=exec_plan.get('service_name', 'unknown'),
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
-            data_source_requirements=escape_json_for_template(json.dumps(data_source_requirements, indent=2)),
+            data_source_specifications=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
+            planning_resources=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
+            planning_local_values=escape_json_for_template(json.dumps(planning_local_values, indent=2)),
+            planning_variable_definitions=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
+            planning_output_definitions=escape_json_for_template(json.dumps(planning_output_definitions, indent=2)),
+            planning_terraform_files=escape_json_for_template(json.dumps(planning_terraform_files, indent=2)),
             current_stage=planning_context.get('current_stage', 'planning'),
             active_agent=agent_workspace.get('active_agent', 'data_source_agent'),
-            previous_agent_results=escape_json_for_template(json.dumps(agent_workspace.get('resolved_dependencies', {}), indent=2)),
-            generation_context=escape_json_for_template(json.dumps(generation_context, indent=2)),
-            specific_requirements=extract_specific_requirements(generation_context),
-            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2)),
-            agent_workspace=escape_json_for_template(json.dumps(workspace, indent=2))
+            workspace_generated_resources=escape_json_for_template(generated_resources),
+            workspace_generated_variables=escape_json_for_template(generated_variables),
+            workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
+            workspace_generated_local_values=escape_json_for_template(generated_local_values),
+            workspace_generated_outputs=escape_json_for_template(generated_output_definitions),
+            handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
         )
         
         # Create parser for structured output
@@ -344,7 +409,14 @@ def generate_terraform_data_sources(
                 temperature=llm_config['temperature'],
                 max_tokens=llm_config['max_tokens']
             )
-            
+
+            llm_higher_config = config_instance.get_llm_higher_config()
+            model_higher = LLMProvider.create_llm(
+                provider=llm_higher_config['provider'],
+                model=llm_higher_config.get('model_high'),  # Fallback to regular model
+                temperature=llm_higher_config['temperature'],
+                max_tokens=llm_higher_config['max_tokens']
+            )
             data_generator_logger.log_structured(
                 level="DEBUG",
                 message="LLM initialized successfully for data source generation",
@@ -363,7 +435,7 @@ def generate_terraform_data_sources(
             )
             raise
         
-        chain = prompt | model | parser
+        chain = prompt | model_higher | parser
         
         data_generator_logger.log_structured(
             level="DEBUG",
@@ -405,7 +477,7 @@ def generate_terraform_data_sources(
         )
         
         # Handle resolved dependencies like variable generator
-        resolved_dependencies = current_state.get("pending_dependencies", {}).get("data_source_agent", [])
+        resolved_dependencies = previous_state.get("pending_dependencies", {}).get("data_source_agent", [])
         # Get current resolved dependencies and append new ones
         current_resolved_deps = get_current_state().get("resolved_dependencies", {})
         updated_resolved_deps = {
@@ -501,6 +573,9 @@ def post_process_data_source_response(
     llm_response.generated_data_sources = validated_data_sources
     llm_response.generation_metadata.validation_errors.extend(validation_errors)
     
+    # Update metrics with actual counts
+    update_generation_metrics(llm_response.generation_metadata, validated_data_sources)
+    
     # Enhance dependencies with additional context
     enhanced_dependencies = enhance_data_source_dependencies(
         llm_response.discovered_dependencies, 
@@ -568,6 +643,45 @@ def generate_complete_data_sources_file(data_sources: List[TerraformDataSourceBl
         file_content += "\n"
     
     return file_content.strip()
+
+def update_generation_metrics(
+    metrics: DataSourceGenerationMetrics,
+    data_sources: List[TerraformDataSourceBlock]
+) -> None:
+    """Update metrics with actual generated data source data"""
+    
+    # Update type counts
+    for data_source in data_sources:
+        metrics.data_source_type_counts[data_source.data_source_type] = (
+            metrics.data_source_type_counts.get(data_source.data_source_type, 0) + 1
+        )
+    
+    # Update filter statistics
+    total_filters = 0
+    for data_source in data_sources:
+        if hasattr(data_source, 'filters') and data_source.filters:
+            total_filters += len(data_source.filters)
+        if hasattr(data_source, 'filter') and data_source.filter:
+            total_filters += len(data_source.filter)
+    
+    metrics.total_filters_applied = total_filters
+    
+    # Update dynamic lookups count
+    dynamic_lookups = 0
+    for data_source in data_sources:
+        if hasattr(data_source, 'dynamic_lookup') and data_source.dynamic_lookup:
+            dynamic_lookups += 1
+    
+    metrics.dynamic_lookups_count = dynamic_lookups
+    
+    # Update complexity score (average of all data sources)
+    if data_sources:
+        total_complexity = sum(
+            getattr(data_source, 'complexity_score', 5.0) for data_source in data_sources
+        )
+        metrics.complexity_score = total_complexity / len(data_sources)
+    else:
+        metrics.complexity_score = 0.0
 
 def validate_terraform_data_source(data_source: TerraformDataSourceBlock) -> Dict[str, Any]:
     """Validate individual Terraform data source"""
