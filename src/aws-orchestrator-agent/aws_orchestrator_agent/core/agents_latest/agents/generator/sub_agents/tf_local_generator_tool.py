@@ -17,7 +17,7 @@ from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
 from ..global_state import get_current_state, set_current_state, update_agent_workspace, update_current_state
 from .local_generator_prompts import LOCAL_VALUES_AGENT_SYSTEM_PROMPT, LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE, LOCAL_VALUES_AGENT_USER_PROMPT_TEMPLATE_REFINED
-
+from ..tf_content_compressor import TerraformDataCompressor
 # Create agent logger for local values generator
 local_generator_logger = AgentLogger("LOCAL_GENERATOR")
 
@@ -198,7 +198,7 @@ class TerraformLocalValueGenerationResponse(BaseModel):
     
     # Generation metadata
     generation_metadata: LocalValueGenerationMetrics = Field(..., description="Generation performance metrics")
-    generation_timestamp: datetime = Field(default_factory=datetime.now)
+    generation_timestamp: Optional[datetime] = Field(default=None, description="Timestamp when local values were generated")
     
     # # Complete locals block
     # complete_locals_block: str = Field(..., description="Complete HCL locals block with all generated values")
@@ -217,7 +217,7 @@ class TerraformLocalValueGenerationResponse(BaseModel):
     @field_validator('completion_status')
     @classmethod
     def validate_completion_status(cls, v):
-        valid_statuses = ['in_progress', 'completed', 'blocked', 'error', 'waiting_for_dependencies']
+        valid_statuses = ['in_progress', 'completed', 'blocked', 'error', 'waiting_for_dependencies', 'completed_with_dependencies']
         if v not in valid_statuses:
             raise ValueError(f'Status must be one of: {valid_statuses}')
         return v
@@ -239,7 +239,7 @@ def generate_terraform_locals(
     
     start_time = datetime.now()
 
-    last_3_messages = state.get('messages', [])[-3:]
+    last_3_messages = state.get('messages', [])[-4:]
     
     # Check last 3 messages for ToolMessage types and extract state updates from model_extra
     tool_message_analysis = {}
@@ -342,7 +342,57 @@ def generate_terraform_locals(
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
         workspace = agent_workspace
+
+        # Use TerraformDataCompressor for efficient data compression
+        compressor = TerraformDataCompressor()
         
+        # Log original data sizes for comparison
+        original_sizes = {
+            'resource_specifications': len(json.dumps(planning_resource_specifications)),
+            'variable_definitions': len(json.dumps(planning_variable_definitions)),
+            'local_values': len(json.dumps(planning_local_values)),
+            'data_sources': len(json.dumps(planning_data_sources)),
+            'output_definitions': len(json.dumps(planning_output_definitions)),
+            'terraform_files': len(json.dumps(planning_terraform_files)),
+            'generated_resources': len(generated_resources),
+            'generated_variables': len(generated_variables),
+            'generated_data_sources': len(generated_data_sources),
+            'generated_local_values': len(generated_local_values),
+            'generated_outputs': len(generated_output_definitions)
+        }
+        
+        compressed_data = compressor.compress_all_planning_data(
+            planning_resource_specifications,
+            planning_variable_definitions,
+            planning_local_values,
+            planning_data_sources,
+            planning_output_definitions,
+            planning_terraform_files,
+            generated_resources,
+            generated_variables,
+            generated_data_sources,
+            generated_local_values,
+            generated_output_definitions,
+            extract_configuration_optimizer_data(generation_context)
+        )
+        
+        # Log compression results
+        compressed_sizes = {key: len(value) for key, value in compressed_data.items()}
+        total_original = sum(original_sizes.values())
+        total_compressed = sum(compressed_sizes.values())
+        compression_ratio = (total_original - total_compressed) / total_original * 100 if total_original > 0 else 0
+
+        local_generator_logger.log_structured(
+            level="INFO",
+            message="Data compression completed successfully",
+            extra={
+                "original_total_chars": total_original,
+                "compressed_total_chars": total_compressed,
+                "compression_ratio_percent": round(compression_ratio, 2),
+                "original_sizes": original_sizes,
+                "compressed_sizes": compressed_sizes
+            }
+        )
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
             """Escape curly braces in JSON strings for template compatibility"""
@@ -353,20 +403,20 @@ def generate_terraform_locals(
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
-            local_value_specifications=escape_json_for_template(json.dumps(local_value_requirements, indent=2)),
-            planning_resources=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
-            planning_variables=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
-            planning_data_sources=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
-            planning_output_definitions=escape_json_for_template(json.dumps(planning_output_definitions, indent=2)),
-            planning_terraform_files=escape_json_for_template(json.dumps(planning_terraform_files, indent=2)),
+            local_value_specifications=escape_json_for_template(compressed_data['local_values']),
+            planning_resources=escape_json_for_template(compressed_data['resource_specifications']),
+            planning_variable_definitions=escape_json_for_template(compressed_data['variable_definitions']),
+            planning_data_sources=escape_json_for_template(compressed_data['data_sources']),
+            planning_output_definitions=escape_json_for_template(compressed_data['output_definitions']),
+            # planning_terraform_files=escape_json_for_template(compressed_data['terraform_files']),
             current_stage=planning_context.get('current_stage', 'planning'),
             active_agent=agent_workspace.get('active_agent', 'local_values_agent'),
-            workspace_generated_resources=escape_json_for_template(generated_resources),
-            workspace_generated_variables=escape_json_for_template(generated_variables),
-            workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
-            workspace_generated_local_values=escape_json_for_template(generated_local_values),
-            workspace_generated_outputs=escape_json_for_template(generated_output_definitions),
-            specific_requirements=extract_specific_requirements(generation_context),
+            workspace_generated_resources=escape_json_for_template(compressed_data['workspace_generated_resources']),
+            workspace_generated_variables=escape_json_for_template(compressed_data['workspace_generated_variables']),
+            workspace_generated_data_sources=escape_json_for_template(compressed_data['workspace_generated_data_sources']),
+            workspace_generated_local_values=escape_json_for_template(compressed_data['workspace_generated_local_values']),
+            workspace_generated_outputs=escape_json_for_template(compressed_data['workspace_generated_outputs']),
+            # specific_requirements=extract_specific_requirements(generation_context),
             handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
         )
         
@@ -406,6 +456,7 @@ def generate_terraform_locals(
             )
             
             llm_higher_config = config_instance.get_llm_higher_config()
+            
             model_higher = LLMProvider.create_llm(
                 provider=llm_higher_config['provider'],
                 model=llm_higher_config['model'],
@@ -510,6 +561,22 @@ def generate_terraform_locals(
         )
         return create_local_values_error_response(e, agent_workspace, datetime.now())
 
+
+def extract_configuration_optimizer_data(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract configuration optimizer data from planner data structure"""
+    optimizer_data = {}
+    
+    # Extract from planner data structure
+    planner_data = context.get('planner_data', {})
+    execution_data = planner_data.get('execution_data', {})
+    configuration_optimizer_data = execution_data.get('configuration_optimizer_data', {})
+    
+    # Extract configuration optimizers
+    if 'configuration_optimizers' in configuration_optimizer_data:
+        optimizer_data['configuration_optimizers'] = configuration_optimizer_data['configuration_optimizers']
+    
+    return optimizer_data
+
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
     """Extract specific requirements from context"""
     requirements = []
@@ -539,58 +606,80 @@ def post_process_local_values_response(
     context: Dict[str, Any],
     start_time: datetime
 ) -> TerraformLocalValueGenerationResponse:
-    """Post-process LLM response with additional validation and enhancements"""
+    """Post-process LLM response with comprehensive validation and enhancements"""
     
     # Calculate actual generation duration
     generation_duration = (datetime.now() - start_time).total_seconds()
     llm_response.generation_metadata.generation_duration_seconds = generation_duration
     
-    # Validate generated local values and expressions
+    # Fix generation timestamp if it's empty or invalid
+    if not llm_response.generation_timestamp or llm_response.generation_timestamp == "":
+        llm_response.generation_timestamp = datetime.now()
+    
+    # Validate generated local values with flexible validation
     validated_locals = []
     validation_errors = []
+    validation_warnings = []
     
     for local_value in llm_response.generated_locals:
         validation_result = validate_terraform_local_value(local_value)
+        
+        # Always include local values unless they have critical errors
         if validation_result['valid']:
             validated_locals.append(local_value)
+            # Add warnings to recoverable warnings
+            if validation_result.get('warnings'):
+                validation_warnings.extend(validation_result['warnings'])
         else:
+            # Only filter out local values with critical errors
             validation_errors.extend(validation_result['errors'])
-            # Attempt to fix common issues
+            # Attempt to fix critical issues
             fixed_local = attempt_local_value_fix(local_value, validation_result['errors'])
             if fixed_local:
                 validated_locals.append(fixed_local)
                 llm_response.recoverable_warnings.append(
-                    f"Fixed validation issues for local.{local_value.name}"
+                    f"Fixed critical validation issues for local.{local_value.name}"
+                )
+            else:
+                # If we can't fix critical issues, still include the local value but log the error
+                validated_locals.append(local_value)
+                llm_response.recoverable_warnings.append(
+                    f"Local '{local_value.name}' has critical issues but included anyway"
                 )
     
     # Update response with validated locals
     llm_response.generated_locals = validated_locals
     llm_response.generation_metadata.validation_errors.extend(validation_errors)
     
-    # Generate complete locals block
-    llm_response.complete_locals_block = generate_complete_locals_block(validated_locals)
+    # Add validation warnings to recoverable warnings
+    if validation_warnings:
+        llm_response.recoverable_warnings.extend(validation_warnings)
+    
+    # Generate complete locals block (preserve original if validation filtered all but original exists)
+    if validated_locals:
+        llm_response.complete_locals_file = generate_complete_locals_file(validated_locals)
+    elif llm_response.complete_locals_file:
+        # Keep LLM-provided file content if present to avoid losing valid output due to strict validation
+        llm_response.complete_locals_file = llm_response.complete_locals_file.strip()
+    else:
+        llm_response.complete_locals_file = ""
     
     # Update metrics with actual counts
     update_generation_metrics(llm_response.generation_metadata, validated_locals)
     
-    # Enhance dependencies with additional context
-    enhanced_dependencies = enhance_local_value_dependencies(
-        llm_response.discovered_dependencies, 
-        validated_locals,
-        context
-    )
-    llm_response.discovered_dependencies = enhanced_dependencies
+    # Use original discovered dependencies without enhancement
+    # The LLM already provides the necessary context for each dependency
     
     # Create comprehensive handoff recommendations
     llm_response.handoff_recommendations = create_local_value_handoff_recommendations(
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         validated_locals
     )
     
     # Add comprehensive state updates
     llm_response.state_updates = create_local_value_state_updates(
         validated_locals,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         agent_workspace,
         llm_response.completion_status
     )
@@ -598,7 +687,7 @@ def post_process_local_values_response(
     # Add workspace updates
     llm_response.workspace_updates = create_local_value_workspace_updates(
         validated_locals,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.generation_metadata,
         llm_response.completion_status
     )
@@ -606,12 +695,11 @@ def post_process_local_values_response(
     # Add checkpoint data
     llm_response.checkpoint_data = create_local_value_checkpoint_data(
         validated_locals,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.completion_status
     )
     
-    # Generate complete locals file
-    llm_response.complete_locals_file = generate_complete_locals_file(validated_locals)
+    # Complete locals file already set above with proper fallback handling
     
     return llm_response
 
@@ -642,8 +730,9 @@ def update_generation_metrics(
     
     # Update type counts
     for local_val in locals:
-        metrics.local_type_counts[local_val.local_type] = (
-            metrics.local_type_counts.get(local_val.local_type, 0) + 1
+        # Use expression_type (model field) instead of non-existent local_type
+        metrics.local_type_counts[local_val.expression_type] = (
+            metrics.local_type_counts.get(local_val.expression_type, 0) + 1
         )
     
     # Update complexity distribution
@@ -968,42 +1057,6 @@ def generate_complete_locals_block(locals_list: List[TerraformLocalValue]) -> st
     lines.append("}")
     
     return "\n".join(lines)
-
-def enhance_local_value_dependencies(
-    dependencies: List[DiscoveredLocalDependency],
-    locals_list: List[TerraformLocalValue],
-    context: Dict[str, Any]
-) -> List[DiscoveredLocalDependency]:
-    """Enhance dependencies with additional context and validation"""
-    
-    enhanced_deps = []
-    
-    for dep in dependencies:
-        enhanced_dep = dep.copy(deep=True)
-        
-        # Add local value context
-        source_local = next(
-            (local for local in locals_list if local.name == dep.source_local),
-            None
-        )
-        
-        if source_local:
-            enhanced_dep.handoff_context.update({
-                'source_local_expression': source_local.expression,
-                'source_local_type': source_local.expression_type,
-                'source_local_complexity': source_local.complexity_level,
-                'expression_fragment': dep.expression_fragment
-            })
-        
-        # Add execution plan context
-        enhanced_dep.handoff_context.update({
-            'execution_plan_excerpt': context.get('execution_plan', {}),
-            'generation_context': context
-        })
-        
-        enhanced_deps.append(enhanced_dep)
-    
-    return enhanced_deps
 
 def create_local_value_handoff_recommendations(
     dependencies: List[DiscoveredLocalDependency],

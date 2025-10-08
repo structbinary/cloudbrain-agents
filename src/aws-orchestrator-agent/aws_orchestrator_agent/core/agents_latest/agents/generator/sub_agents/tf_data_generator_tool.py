@@ -17,7 +17,7 @@ from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
 from ..global_state import get_current_state, set_current_state, update_agent_workspace, update_current_state
 from .data_generator_prompts import DATA_SOURCE_AGENT_SYSTEM_PROMPT, DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE, DATA_SOURCE_AGENT_USER_PROMPT_TEMPLATE_REFINED
-
+from ..tf_content_compressor import TerraformDataCompressor
 # Create agent logger for data source generator
 data_generator_logger = AgentLogger("DATA_GENERATOR")
 
@@ -207,7 +207,7 @@ class TerraformDataSourceGenerationResponse(BaseModel):
     
     # Generation metadata
     generation_metadata: DataSourceGenerationMetrics = Field(..., description="Generation performance metrics")
-    generation_timestamp: datetime = Field(default_factory=datetime.now)
+    generation_timestamp: Optional[datetime] = Field(default=None, description="Timestamp when data sources were generated")
     
     # State updates
     state_updates: Dict[str, Any] = Field(default_factory=dict, description="Updates to apply to swarm state")
@@ -223,7 +223,7 @@ class TerraformDataSourceGenerationResponse(BaseModel):
     @field_validator('completion_status')
     @classmethod
     def validate_completion_status(cls, v):
-        valid_statuses = ['in_progress', 'completed', 'blocked', 'error', 'waiting_for_dependencies']
+        valid_statuses = ['in_progress', 'completed', 'blocked', 'error', 'waiting_for_dependencies', 'completed_with_dependencies']
         if v not in valid_statuses:
             raise ValueError(f'Status must be one of: {valid_statuses}')
         return v
@@ -245,7 +245,7 @@ def generate_terraform_data_sources(
 
     start_time = datetime.now()
 
-    last_3_messages = state.get('messages', [])[-3:]
+    last_3_messages = state.get('messages', [])[-4:]
     
     # Check last 3 messages for ToolMessage types and extract state updates from model_extra
     tool_message_analysis = {}
@@ -347,7 +347,57 @@ def generate_terraform_data_sources(
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
         workspace = agent_workspace
+
+        # Use TerraformDataCompressor for efficient data compression
+        compressor = TerraformDataCompressor()
         
+        # Log original data sizes for comparison
+        original_sizes = {
+            'resource_specifications': len(json.dumps(planning_resource_specifications)),
+            'variable_definitions': len(json.dumps(planning_variable_definitions)),
+            'local_values': len(json.dumps(planning_local_values)),
+            'data_sources': len(json.dumps(planning_data_sources)),
+            'output_definitions': len(json.dumps(planning_output_definitions)),
+            'terraform_files': len(json.dumps(planning_terraform_files)),
+            'generated_resources': len(generated_resources),
+            'generated_variables': len(generated_variables),
+            'generated_data_sources': len(generated_data_sources),
+            'generated_local_values': len(generated_local_values),
+            'generated_outputs': len(generated_output_definitions)
+        }
+        
+        compressed_data = compressor.compress_all_planning_data(
+            planning_resource_specifications,
+            planning_variable_definitions,
+            planning_local_values,
+            planning_data_sources,
+            planning_output_definitions,
+            planning_terraform_files,
+            generated_resources,
+            generated_variables,
+            generated_data_sources,
+            generated_local_values,
+            generated_output_definitions,
+            extract_configuration_optimizer_data(generation_context)
+        )
+        
+        # Log compression results
+        compressed_sizes = {key: len(value) for key, value in compressed_data.items()}
+        total_original = sum(original_sizes.values())
+        total_compressed = sum(compressed_sizes.values())
+        compression_ratio = (total_original - total_compressed) / total_original * 100 if total_original > 0 else 0
+
+        data_generator_logger.log_structured(
+            level="INFO",
+            message="Data compression completed successfully",
+            extra={
+                "original_total_chars": total_original,
+                "compressed_total_chars": total_compressed,
+                "compression_ratio_percent": round(compression_ratio, 2),
+                "original_sizes": original_sizes,
+                "compressed_sizes": compressed_sizes
+            }
+        )
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
             """Escape curly braces in JSON strings for template compatibility"""
@@ -358,19 +408,19 @@ def generate_terraform_data_sources(
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
-            data_source_specifications=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
-            planning_resources=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
-            planning_local_values=escape_json_for_template(json.dumps(planning_local_values, indent=2)),
-            planning_variable_definitions=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
-            planning_output_definitions=escape_json_for_template(json.dumps(planning_output_definitions, indent=2)),
-            planning_terraform_files=escape_json_for_template(json.dumps(planning_terraform_files, indent=2)),
+            data_source_specifications=escape_json_for_template(compressed_data['data_sources']),
+            planning_resources=escape_json_for_template(compressed_data['resource_specifications']),
+            planning_local_values=escape_json_for_template(compressed_data['local_values']),
+            planning_variable_definitions=escape_json_for_template(compressed_data['variable_definitions']),
+            planning_output_definitions=escape_json_for_template(compressed_data['output_definitions']),
+            # planning_terraform_files=escape_json_for_template(compressed_data['terraform_files']),
             current_stage=planning_context.get('current_stage', 'planning'),
             active_agent=agent_workspace.get('active_agent', 'data_source_agent'),
-            workspace_generated_resources=escape_json_for_template(generated_resources),
-            workspace_generated_variables=escape_json_for_template(generated_variables),
-            workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
-            workspace_generated_local_values=escape_json_for_template(generated_local_values),
-            workspace_generated_outputs=escape_json_for_template(generated_output_definitions),
+            workspace_generated_resources=escape_json_for_template(compressed_data['workspace_generated_resources']),
+            workspace_generated_variables=escape_json_for_template(compressed_data['workspace_generated_variables']),
+            workspace_generated_data_sources=escape_json_for_template(compressed_data['workspace_generated_data_sources']),
+            workspace_generated_local_values=escape_json_for_template(compressed_data['workspace_generated_local_values']),
+            workspace_generated_outputs=escape_json_for_template(compressed_data['workspace_generated_outputs']),
             handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
         )
         
@@ -405,15 +455,16 @@ def generate_terraform_data_sources(
             # Use higher model for data source generation
             model = LLMProvider.create_llm(
                 provider=llm_config['provider'],
-                model=llm_config.get('model_high', llm_config['model']),  # Fallback to regular model
+                model=llm_config['model'],  
                 temperature=llm_config['temperature'],
                 max_tokens=llm_config['max_tokens']
             )
 
             llm_higher_config = config_instance.get_llm_higher_config()
+
             model_higher = LLMProvider.create_llm(
                 provider=llm_higher_config['provider'],
-                model=llm_higher_config.get('model_high'),  # Fallback to regular model
+                model=llm_higher_config['model'],  # Fallback to regular model
                 temperature=llm_higher_config['temperature'],
                 max_tokens=llm_higher_config['max_tokens']
             )
@@ -519,6 +570,23 @@ def generate_terraform_data_sources(
         )
         return create_data_source_error_response(e, agent_workspace, datetime.now())
 
+
+def extract_configuration_optimizer_data(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract configuration optimizer data from planner data structure"""
+    optimizer_data = {}
+    
+    # Extract from planner data structure
+    planner_data = context.get('planner_data', {})
+    execution_data = planner_data.get('execution_data', {})
+    configuration_optimizer_data = execution_data.get('configuration_optimizer_data', {})
+    
+    # Extract configuration optimizers
+    if 'configuration_optimizers' in configuration_optimizer_data:
+        optimizer_data['configuration_optimizers'] = configuration_optimizer_data['configuration_optimizers']
+    
+    return optimizer_data
+
+
 def extract_specific_requirements(context: Dict[str, Any]) -> str:
     """Extract specific requirements from context"""
     requirements = []
@@ -545,55 +613,71 @@ def post_process_data_source_response(
     context: Dict[str, Any],
     start_time: datetime
 ) -> TerraformDataSourceGenerationResponse:
-    """Post-process LLM response with additional validation and enhancements"""
+    """Post-process LLM response with comprehensive validation and enhancements"""
     
     # Calculate actual generation duration
     generation_duration = (datetime.now() - start_time).total_seconds()
     llm_response.generation_metadata.generation_duration_seconds = generation_duration
     
-    # Validate generated HCL syntax and data source configurations
+    # Fix generation timestamp if it's empty or invalid
+    if not llm_response.generation_timestamp or llm_response.generation_timestamp == "":
+        llm_response.generation_timestamp = datetime.now()
+    
+    # Validate generated data sources with flexible validation
     validated_data_sources = []
     validation_errors = []
+    validation_warnings = []
     
     for data_source in llm_response.generated_data_sources:
         validation_result = validate_terraform_data_source(data_source)
+        
+        # Always include data sources unless they have critical errors
         if validation_result['valid']:
             validated_data_sources.append(data_source)
+            # Add warnings to recoverable warnings
+            if validation_result.get('warnings'):
+                validation_warnings.extend(validation_result['warnings'])
         else:
+            # Only filter out data sources with critical errors
             validation_errors.extend(validation_result['errors'])
-            # Attempt to fix common issues
+            # Attempt to fix critical issues
             fixed_data_source = attempt_data_source_fix(data_source, validation_result['errors'])
             if fixed_data_source:
                 validated_data_sources.append(fixed_data_source)
                 llm_response.recoverable_warnings.append(
-                    f"Fixed validation issues for {data_source.data_source_name}"
+                    f"Fixed critical validation issues for {data_source.data_source_name}"
+                )
+            else:
+                # If we can't fix critical issues, still include the data source but log the error
+                validated_data_sources.append(data_source)
+                llm_response.recoverable_warnings.append(
+                    f"Data source '{data_source.data_source_name}' has critical issues but included anyway"
                 )
     
     # Update response with validated data sources
     llm_response.generated_data_sources = validated_data_sources
     llm_response.generation_metadata.validation_errors.extend(validation_errors)
     
+    # Add validation warnings to recoverable warnings
+    if validation_warnings:
+        llm_response.recoverable_warnings.extend(validation_warnings)
+    
     # Update metrics with actual counts
     update_generation_metrics(llm_response.generation_metadata, validated_data_sources)
     
-    # Enhance dependencies with additional context
-    enhanced_dependencies = enhance_data_source_dependencies(
-        llm_response.discovered_dependencies, 
-        validated_data_sources,
-        context
-    )
-    llm_response.discovered_dependencies = enhanced_dependencies
+    # Use original discovered dependencies without enhancement
+    # The LLM already provides the necessary context for each dependency
     
     # Create comprehensive handoff recommendations
     llm_response.handoff_recommendations = create_data_source_handoff_recommendations(
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         validated_data_sources
     )
     
     # Add comprehensive state updates
     llm_response.state_updates = create_data_source_state_updates(
         validated_data_sources,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         agent_workspace,
         llm_response.completion_status
     )
@@ -601,7 +685,7 @@ def post_process_data_source_response(
     # Add workspace updates
     llm_response.workspace_updates = create_data_source_workspace_updates(
         validated_data_sources,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.generation_metadata,
         llm_response.completion_status
     )
@@ -609,7 +693,7 @@ def post_process_data_source_response(
     # Add checkpoint data
     llm_response.checkpoint_data = create_data_source_checkpoint_data(
         validated_data_sources,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.completion_status
     )
     
@@ -716,8 +800,8 @@ def validate_data_source_hcl_syntax(hcl_block: str) -> bool:
         if hcl_block.count('{') != hcl_block.count('}'):
             return False
         
-        # Check for valid data source block structure
-        if not re.match(r'data\s+"[^"]+"\s+"[^"]+"\s*{', hcl_block):
+        # Check for valid data source block structure - very lenient
+        if not re.search(r'data\s+"[^"]+"\s+"[^"]+"', hcl_block):
             return False
         
         # Check for proper attribute formatting
@@ -940,41 +1024,6 @@ def fix_data_source_name(data_source_name: str) -> str:
         fixed = fixed[:64].rstrip('_')
     
     return fixed
-
-def enhance_data_source_dependencies(
-    dependencies: List[DiscoveredDataDependency],
-    data_sources: List[TerraformDataSourceBlock],
-    context: Dict[str, Any]
-) -> List[DiscoveredDataDependency]:
-    """Enhance dependencies with additional context and validation"""
-    
-    enhanced_deps = []
-    
-    for dep in dependencies:
-        enhanced_dep = dep.copy(deep=True)
-        
-        # Add data source context
-        source_data_source = next(
-            (ds for ds in data_sources if ds.data_source_name == dep.source_data_source),
-            None
-        )
-        
-        if source_data_source:
-            enhanced_dep.handoff_context.update({
-                'source_data_source_type': source_data_source.data_source_type,
-                'source_data_source_config': source_data_source.configuration_attributes,
-                'source_filters': [f.dict() for f in source_data_source.filters]
-            })
-        
-        # Add execution plan context
-        enhanced_dep.handoff_context.update({
-            'execution_plan_excerpt': context.get('execution_plan', {}),
-            'generation_context': context
-        })
-        
-        enhanced_deps.append(enhanced_dep)
-    
-    return enhanced_deps
 
 def create_data_source_handoff_recommendations(
     dependencies: List[DiscoveredDataDependency],

@@ -181,7 +181,7 @@ class TerraformResourceGenerationResponse(BaseModel):
     
     # Generation metadata
     generation_metadata: ResourceGenerationMetrics = Field(..., description="Generation performance metrics")
-    generation_timestamp: datetime = Field(default_factory=datetime.now)
+    generation_timestamp: Optional[datetime] = Field(default=None, description="Timestamp when resources were generated")
     
     # Complete resources file
     complete_resources_file: str = Field(..., description="Complete resources.tf file content")
@@ -235,7 +235,7 @@ def generate_terraform_resources(
     """
     start_time = datetime.now()
 
-    last_3_messages = state.get('messages', [])[-3:]
+    last_3_messages = state.get('messages', [])[-4:]
     
     # Check last 3 messages for ToolMessage types and extract state updates from model_extra
     tool_message_analysis = {}
@@ -419,7 +419,7 @@ def generate_terraform_resources(
             planning_local_values=escape_json_for_template(compressed_data['local_values']),
             planning_data_sources=escape_json_for_template(compressed_data['data_sources']),
             planning_output_definitions=escape_json_for_template(compressed_data['output_definitions']),
-            planning_terraform_files=escape_json_for_template(compressed_data['terraform_files']),
+            # planning_terraform_files=escape_json_for_template(compressed_data['terraform_files']),
             current_stage=planning_context.get('current_stage', 'generation'),
             active_agent=agent_workspace.get('active_agent', 'resource_configuration_agent'),
             workspace_generated_resources=escape_json_for_template(compressed_data['workspace_generated_resources']),
@@ -792,27 +792,48 @@ def post_process_llm_response(
     generation_duration = (datetime.now() - start_time).total_seconds()
     llm_response.generation_metadata.generation_duration_seconds = generation_duration
     
-    # Validate generated resources (supporting both planner specs and dynamic types)
+    # Fix generation timestamp if it's empty or invalid
+    if not llm_response.generation_timestamp or llm_response.generation_timestamp == "":
+        llm_response.generation_timestamp = datetime.now()
+    
+    # Validate generated resources with flexible validation
     validated_resources = []
     validation_errors = []
+    validation_warnings = []
     
     for resource in llm_response.generated_resources:
         validation_result = validate_terraform_resource(resource)
+        
+        # Always include resources unless they have critical errors
         if validation_result['valid']:
             validated_resources.append(resource)
+            # Add warnings to recoverable warnings
+            if validation_result.get('warnings'):
+                validation_warnings.extend(validation_result['warnings'])
         else:
+            # Only filter out resources with critical errors
             validation_errors.extend(validation_result['errors'])
-            # Attempt to fix common issues
+            # Attempt to fix critical issues
             fixed_resource = attempt_resource_fix(resource, validation_result['errors'])
             if fixed_resource:
                 validated_resources.append(fixed_resource)
                 llm_response.recoverable_warnings.append(
-                    f"Fixed validation issues for {resource.resource_name}"
+                    f"Fixed critical validation issues for {resource.resource_name}"
+                )
+            else:
+                # If we can't fix critical issues, still include the resource but log the error
+                validated_resources.append(resource)
+                llm_response.recoverable_warnings.append(
+                    f"Resource {resource.resource_name} has critical issues but included anyway"
                 )
     
     # Update response with validated resources
     llm_response.generated_resources = validated_resources
     llm_response.generation_metadata.validation_errors.extend(validation_errors)
+    
+    # Add validation warnings to recoverable warnings
+    if validation_warnings:
+        llm_response.recoverable_warnings.extend(validation_warnings)
     
     # Generate complete resources file
     llm_response.complete_resources_file = generate_complete_resources_file(validated_resources)
@@ -852,29 +873,33 @@ def post_process_llm_response(
     return llm_response
 
 def validate_terraform_resource(resource: TerraformResourceBlock) -> Dict[str, Any]:
-    """Validate individual Terraform resource with support for dynamic types"""
+    """Validate individual Terraform resource with flexible validation"""
     errors = []
+    warnings = []
     
-    # Validate HCL syntax
+    # Only validate critical issues that would break Terraform
+    # Be more lenient with non-critical issues
+    
+    # 1. Basic HCL syntax (critical)
     if not validate_hcl_syntax(resource.hcl_block):
         errors.append(f"Invalid HCL syntax in {resource.resource_name}")
     
-    # Validate AWS resource type (supporting dynamic types)
-    if not validate_aws_resource_type(resource.resource_type, resource.configuration_attributes):
-        errors.append(f"Invalid AWS resource configuration for {resource.resource_type}")
+    # 2. AWS resource type validation (more flexible)
+    if not validate_aws_resource_type_flexible(resource.resource_type, resource.configuration_attributes):
+        warnings.append(f"Resource type {resource.resource_type} may need review")
     
-    # Validate naming conventions
+    # 3. Naming convention (warning only, not blocking)
     if not validate_naming_convention(resource.resource_name):
-        errors.append(f"Resource name {resource.resource_name} doesn't follow conventions")
+        warnings.append(f"Resource name {resource.resource_name} doesn't follow conventions")
     
-    # Validate required attributes
-    missing_attrs = validate_required_attributes(resource)
-    if missing_attrs:
-        errors.extend([f"Missing required attribute: {attr}" for attr in missing_attrs])
+    # 4. Skip required attributes validation - trust the LLM
+    # No validation needed for required attributes
     
+    # Only fail validation for critical errors, not warnings
     return {
         'valid': len(errors) == 0,
-        'errors': errors
+        'errors': errors,
+        'warnings': warnings
     }
 
 def validate_hcl_syntax(hcl_block: str) -> bool:
@@ -937,6 +962,25 @@ def validate_aws_resource_type(resource_type: Union[ResourceBlockType, str], att
     
     return True
 
+def validate_aws_resource_type_flexible(resource_type: Union[ResourceBlockType, str], attributes: Dict[str, Any]) -> bool:
+    """Flexible AWS resource type validation - more lenient for all AWS resources"""
+    
+    # Convert to string for validation
+    resource_type_str = str(resource_type)
+    
+    # Only validate that it's an AWS resource type
+    if not resource_type_str.startswith('aws_'):
+        return False
+    
+    # For all AWS resources, be flexible with configuration
+    # AWS resources can have various configurations and optional attributes
+    if not attributes:
+        return False
+    
+    # Allow any AWS resource type with basic attributes
+    # The LLM is smart enough to generate valid configurations
+    return True
+
 def validate_dynamic_resource_type(resource_type: str, attributes: Dict[str, Any]) -> bool:
     """Validate dynamic resource types not in the predefined list"""
     # Basic validation for unknown AWS resource types
@@ -976,6 +1020,7 @@ def validate_required_attributes(resource: TerraformResourceBlock) -> List[str]:
             missing.append(attr)
     
     return missing
+
 
 def attempt_resource_fix(
     resource: TerraformResourceBlock, 

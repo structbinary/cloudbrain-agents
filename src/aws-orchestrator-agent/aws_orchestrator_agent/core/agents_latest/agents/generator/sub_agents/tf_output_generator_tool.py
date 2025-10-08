@@ -18,7 +18,7 @@ from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
 from ..global_state import get_current_state, set_current_state, update_agent_workspace, update_current_state
 from .output_generator_prompts import OUTPUT_DEFINITION_AGENT_USER_PROMPT_TEMPLATE_REFINED, OUTPUT_DEFINITION_AGENT_SYSTEM_PROMPT
-
+from ..tf_content_compressor import TerraformDataCompressor
 # Create agent logger for output generator
 output_generator_logger = AgentLogger("OUTPUT_GENERATOR")
 
@@ -233,7 +233,7 @@ class TerraformOutputGenerationResponse(BaseModel):
     
     # Generation metadata
     generation_metadata: OutputGenerationMetrics = Field(..., description="Generation performance metrics")
-    generation_timestamp: datetime = Field(default_factory=datetime.now)
+    generation_timestamp: Optional[datetime] = Field(default=None, description="Timestamp when outputs were generated")
     
     # # Complete outputs file
     # complete_outputs_file: str = Field(..., description="Complete outputs.tf file content")
@@ -252,7 +252,7 @@ class TerraformOutputGenerationResponse(BaseModel):
     @field_validator('completion_status')
     @classmethod
     def validate_completion_status(cls, v):
-        valid_statuses = ['in_progress', 'completed', 'blocked', 'error', 'waiting_for_dependencies']
+        valid_statuses = ['in_progress', 'completed', 'blocked', 'error', 'waiting_for_dependencies', 'completed_with_dependencies']
         if v not in valid_statuses:
             raise ValueError(f'Status must be one of: {valid_statuses}')
         return v
@@ -276,7 +276,7 @@ def generate_terraform_outputs(
     
     start_time = datetime.now()
 
-    last_3_messages = state.get('messages', [])[-3:]
+    last_3_messages = state.get('messages', [])[-4:]
     
     # Check last 3 messages for ToolMessage types and extract state updates from model_extra
     tool_message_analysis = {}
@@ -380,6 +380,56 @@ def generate_terraform_outputs(
         exec_plan = generation_context.get('execution_plan', {})
         workspace = agent_workspace
 
+        # Use TerraformDataCompressor for efficient data compression
+        compressor = TerraformDataCompressor()
+        
+        # Log original data sizes for comparison
+        original_sizes = {
+            'resource_specifications': len(json.dumps(planning_resource_specifications)),
+            'variable_definitions': len(json.dumps(planning_variable_definitions)),
+            'local_values': len(json.dumps(planning_local_values)),
+            'data_sources': len(json.dumps(planning_data_sources)),
+            'output_definitions': len(json.dumps(planning_output_definitions)),
+            'terraform_files': len(json.dumps(planning_terraform_files)),
+            'generated_resources': len(generated_resources),
+            'generated_variables': len(generated_variables),
+            'generated_data_sources': len(generated_data_sources),
+            'generated_local_values': len(generated_local_values),
+            'generated_outputs': len(generated_output_definitions)
+        }
+        
+        compressed_data = compressor.compress_all_planning_data(
+            planning_resource_specifications,
+            planning_variable_definitions,
+            planning_local_values,
+            planning_data_sources,
+            planning_output_definitions,
+            planning_terraform_files,
+            generated_resources,
+            generated_variables,
+            generated_data_sources,
+            generated_local_values,
+            generated_output_definitions,
+            extract_configuration_optimizer_data(generation_context)
+        )
+        
+        # Log compression results
+        compressed_sizes = {key: len(value) for key, value in compressed_data.items()}
+        total_original = sum(original_sizes.values())
+        total_compressed = sum(compressed_sizes.values())
+        compression_ratio = (total_original - total_compressed) / total_original * 100 if total_original > 0 else 0
+
+        output_generator_logger.log_structured(
+            level="INFO",
+            message="Data compression completed successfully",
+            extra={
+                "original_total_chars": total_original,
+                "compressed_total_chars": total_compressed,
+                "compression_ratio_percent": round(compression_ratio, 2),
+                "original_sizes": original_sizes,
+                "compressed_sizes": compressed_sizes
+            }
+        )
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
             """Escape curly braces in JSON strings for template compatibility"""
@@ -390,19 +440,19 @@ def generate_terraform_outputs(
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
-            output_specifications=escape_json_for_template(json.dumps(planning_output_definitions, indent=2)),
-            planning_resources=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
-            planning_variables=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
-            planning_data_sources=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
-            planning_local_values=escape_json_for_template(json.dumps(planning_local_values, indent=2)),
-            planning_terraform_files=escape_json_for_template(json.dumps(planning_terraform_files, indent=2)),
+            output_specifications=escape_json_for_template(compressed_data['output_definitions']),
+            planning_resources=escape_json_for_template(compressed_data['resource_specifications']),
+            planning_variables=escape_json_for_template(compressed_data['variable_definitions']),
+            planning_data_sources=escape_json_for_template(compressed_data['data_sources']),
+            planning_local_values=escape_json_for_template(compressed_data['local_values']),
+            # planning_terraform_files=escape_json_for_template(compressed_data['terraform_files']),
             current_stage=planning_context.get('current_stage', 'generation'),
             active_agent=agent_workspace.get('active_agent', 'output_definition_agent'),
-            workspace_generated_outputs=escape_json_for_template(generated_output_definitions),
-            workspace_generated_variables=escape_json_for_template(generated_variables),
-            workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
-            workspace_generated_local_values=escape_json_for_template(generated_local_values),
-            workspace_generated_resources=escape_json_for_template(generated_resources),
+            workspace_generated_outputs=escape_json_for_template(compressed_data['workspace_generated_outputs']),
+            workspace_generated_variables=escape_json_for_template(compressed_data['workspace_generated_variables']),
+            workspace_generated_data_sources=escape_json_for_template(compressed_data['workspace_generated_data_sources']),
+            workspace_generated_local_values=escape_json_for_template(compressed_data['workspace_generated_local_values']),
+            workspace_generated_resources=escape_json_for_template(compressed_data['workspace_generated_resources']),
             handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
         )
         # Create parser for structured output
@@ -434,15 +484,16 @@ def generate_terraform_outputs(
             # Use higher model for output generation
             model = LLMProvider.create_llm(
                 provider=llm_config['provider'],
-                model=llm_config.get('model_high', llm_config['model']),  # Fallback to regular model
+                model=llm_config['model'],
                 temperature=llm_config['temperature'],
                 max_tokens=llm_config['max_tokens']
             )
             
             llm_higher_config = config_instance.get_llm_higher_config()
+
             model_higher = LLMProvider.create_llm(
                 provider=llm_higher_config['provider'],
-                model=llm_higher_config.get('model_high'),  # Fallback to regular model
+                model=llm_higher_config['model'], 
                 temperature=llm_higher_config['temperature'],
                 max_tokens=llm_higher_config['max_tokens']
             )
@@ -538,6 +589,22 @@ def generate_terraform_outputs(
         )
         return create_output_error_response(e, agent_workspace, datetime.now())
 
+
+def extract_configuration_optimizer_data(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract configuration optimizer data from planner data structure"""
+    optimizer_data = {}
+    
+    # Extract from planner data structure
+    planner_data = context.get('planner_data', {})
+    execution_data = planner_data.get('execution_data', {})
+    configuration_optimizer_data = execution_data.get('configuration_optimizer_data', {})
+    
+    # Extract configuration optimizers
+    if 'configuration_optimizers' in configuration_optimizer_data:
+        optimizer_data['configuration_optimizers'] = configuration_optimizer_data['configuration_optimizers']
+    
+    return optimizer_data
+
 def extract_generated_resources(agent_workspace: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract generated resources from the agent workspace."""
     return agent_workspace.get('terraform_resources', [])
@@ -583,33 +650,54 @@ def post_process_output_response(
     context: Dict[str, Any],
     start_time: datetime
 ) -> TerraformOutputGenerationResponse:
-    """Post-process LLM response with additional validation and enhancements"""
+    """Post-process LLM response with comprehensive validation and enhancements"""
     
     # Calculate actual generation duration
     generation_duration = (datetime.now() - start_time).total_seconds()
     llm_response.generation_metadata.generation_duration_seconds = generation_duration
     
-    # Validate generated outputs
+    # Fix generation timestamp if it's empty or invalid
+    if not llm_response.generation_timestamp or llm_response.generation_timestamp == "":
+        llm_response.generation_timestamp = datetime.now()
+    
+    # Validate generated outputs with flexible validation
     validated_outputs = []
     validation_errors = []
+    validation_warnings = []
     
     for output in llm_response.generated_outputs:
         validation_result = validate_terraform_output(output, state)
+        
+        # Always include outputs unless they have critical errors
         if validation_result['valid']:
             validated_outputs.append(output)
+            # Add warnings to recoverable warnings
+            if validation_result.get('warnings'):
+                validation_warnings.extend(validation_result['warnings'])
         else:
+            # Only filter out outputs with critical errors
             validation_errors.extend(validation_result['errors'])
-            # Attempt to fix common issues
+            # Attempt to fix critical issues
             fixed_output = attempt_output_fix(output, validation_result['errors'], state)
             if fixed_output:
                 validated_outputs.append(fixed_output)
                 llm_response.recoverable_warnings.append(
-                    f"Fixed validation issues for output '{output.name}'"
+                    f"Fixed critical validation issues for output '{output.name}'"
+                )
+            else:
+                # If we can't fix critical issues, still include the output but log the error
+                validated_outputs.append(output)
+                llm_response.recoverable_warnings.append(
+                    f"Output '{output.name}' has critical issues but included anyway"
                 )
     
     # Update response with validated outputs
     llm_response.generated_outputs = validated_outputs
     llm_response.generation_metadata.validation_errors.extend(validation_errors)
+    
+    # Add validation warnings to recoverable warnings
+    if validation_warnings:
+        llm_response.recoverable_warnings.extend(validation_warnings)
     
     # Generate complete outputs file
     llm_response.complete_outputs_file = generate_complete_outputs_file(validated_outputs)
@@ -617,24 +705,19 @@ def post_process_output_response(
     # Update metrics with actual counts
     update_output_generation_metrics(llm_response.generation_metadata, validated_outputs)
     
-    # Enhance dependencies with additional context
-    enhanced_dependencies = enhance_output_dependencies(
-        llm_response.discovered_dependencies, 
-        validated_outputs,
-        context
-    )
-    llm_response.discovered_dependencies = enhanced_dependencies
+    # Use original discovered dependencies without enhancement
+    # The LLM already provides the necessary context for each dependency
     
     # Create comprehensive handoff recommendations
     llm_response.handoff_recommendations = create_output_handoff_recommendations(
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         validated_outputs
     )
     
     # Add comprehensive state updates
     llm_response.state_updates = create_output_state_updates(
         validated_outputs,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         state,
         llm_response.completion_status
     )
@@ -642,7 +725,7 @@ def post_process_output_response(
     # Add workspace updates
     llm_response.workspace_updates = create_output_workspace_updates(
         validated_outputs,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.generation_metadata,
         llm_response.completion_status
     )
@@ -650,7 +733,7 @@ def post_process_output_response(
     # Add checkpoint data
     llm_response.checkpoint_data = create_output_checkpoint_data(
         validated_outputs,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.completion_status
     )
     
@@ -1081,43 +1164,6 @@ def update_output_generation_metrics(
     metrics.data_source_references = sum(len(output.source_data_sources) for output in outputs)
     metrics.local_references = sum(len(output.source_locals) for output in outputs)
     metrics.variable_references = sum(len(output.source_variables) for output in outputs)
-
-def enhance_output_dependencies(
-    dependencies: List[DiscoveredOutputDependency],
-    outputs: List[TerraformOutputBlock],
-    context: Dict[str, Any]
-) -> List[DiscoveredOutputDependency]:
-    """Enhance dependencies with additional context and validation"""
-    
-    enhanced_deps = []
-    
-    for dep in dependencies:
-        enhanced_dep = dep.copy(deep=True)
-        
-        # Add output context
-        source_output = next(
-            (output for output in outputs if output.name == dep.source_output),
-            None
-        )
-        
-        if source_output:
-            enhanced_dep.handoff_context.update({
-                'source_output_type': source_output.output_type,
-                'source_output_complexity': source_output.complexity_level,
-                'source_output_category': source_output.category,
-                'source_output_usage': source_output.usage_context,
-                'value_expression': source_output.value_expression
-            })
-        
-        # Add execution plan context
-        enhanced_dep.handoff_context.update({
-            'execution_plan_excerpt': context.get('execution_plan', {}),
-            'generation_context': context
-        })
-        
-        enhanced_deps.append(enhanced_dep)
-    
-    return enhanced_deps
 
 def create_output_handoff_recommendations(
     dependencies: List[DiscoveredOutputDependency],

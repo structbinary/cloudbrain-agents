@@ -234,7 +234,20 @@ class GeneratorStageController:
         try:
             # Priority 1: Agents with resolved dependencies
             ready_agents = []
-            for agent, status in state["agent_status_matrix"].items():
+            
+            # Define all required agents
+            required_agents = [
+                "resource_configuration_agent",
+                "variable_definition_agent", 
+                "data_source_agent",
+                "local_values_agent",
+                "output_definition_agent"
+            ]
+            
+            for agent in required_agents:
+                # Get status from matrix, default to INACTIVE if not present
+                status = state["agent_status_matrix"].get(agent, GeneratorAgentStatus.INACTIVE)
+                
                 if status in [GeneratorAgentStatus.INACTIVE, GeneratorAgentStatus.WAITING]:
                     dependencies_met = self.check_agent_dependencies_met(agent, state)
                     if dependencies_met:
@@ -301,7 +314,20 @@ class GeneratorStageController:
                 
             # Priority 1: Agents with resolved dependencies
             ready_agents = []
-            for agent, status in agent_status_matrix.items():
+            
+            # Define all required agents
+            required_agents = [
+                "resource_configuration_agent",
+                "variable_definition_agent", 
+                "data_source_agent",
+                "local_values_agent",
+                "output_definition_agent"
+            ]
+            
+            for agent in required_agents:
+                # Get status from matrix, default to INACTIVE if not present
+                status = agent_status_matrix.get(agent, GeneratorAgentStatus.INACTIVE)
+                
                 if status in [GeneratorAgentStatus.INACTIVE, GeneratorAgentStatus.WAITING]:
                     dependencies_met = self.check_agent_dependencies_met_from_params(
                         agent, agent_status_matrix, dependency_graph

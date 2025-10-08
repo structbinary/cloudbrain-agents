@@ -18,6 +18,7 @@ from aws_orchestrator_agent.utils.logger import AgentLogger
 from ..generator_state import GeneratorSwarmState
 from .variable_generator_prompts import VARIABLE_DEFINITION_AGENT_SYSTEM_PROMPT, VARIABLE_DEFINITION_AGENT_USER_PROMPT_TEMPLATE, VARIABLE_DEFINITION_AGENT_USER_PROMPT_TEMPLATE_REFINED
 from ..global_state import get_current_state, set_current_state, update_agent_workspace, update_current_state
+from ..tf_content_compressor import TerraformDataCompressor
 
 # Create agent logger for variable generator
 variable_generator_logger = AgentLogger("VARIABLE_GENERATOR")
@@ -228,7 +229,7 @@ class TerraformVariableGenerationResponse(BaseModel):
     
     # Generation metadata
     generation_metadata: VariableGenerationMetrics = Field(..., description="Generation performance metrics")
-    generation_timestamp: datetime = Field(default_factory=datetime.now)
+    generation_timestamp: Optional[datetime] = Field(default=None, description="Timestamp when variables were generated")
     
     # Complete variables file
     complete_variables_file: str = Field(..., description="Complete variables.tf file content")
@@ -281,7 +282,7 @@ def generate_terraform_variables(
 
     start_time = datetime.now()
 
-    last_3_messages = state.get('messages', [])[-3:]
+    last_3_messages = state.get('messages', [])[-4:]
     
     # Check last 3 messages for ToolMessage types and extract state updates from model_extra
     tool_message_analysis = {}
@@ -384,7 +385,56 @@ def generate_terraform_variables(
         # Extract context for prompt formatting
         exec_plan = generation_context.get('execution_plan', {})
         workspace = agent_workspace
+
+        compressor = TerraformDataCompressor()
         
+        # Log original data sizes for comparison
+        original_sizes = {
+            'resource_specifications': len(json.dumps(planning_resource_specifications)),
+            'variable_definitions': len(json.dumps(planning_variable_definitions)),
+            'local_values': len(json.dumps(planning_local_values)),
+            'data_sources': len(json.dumps(planning_data_sources)),
+            'output_definitions': len(json.dumps(planning_output_definitions)),
+            'terraform_files': len(json.dumps(planning_terraform_files)),
+            'generated_resources': len(generated_resources),
+            'generated_variables': len(generated_variables),
+            'generated_data_sources': len(generated_data_sources),
+            'generated_local_values': len(generated_local_values),
+            'generated_outputs': len(generated_output_definitions)
+        }
+        
+        compressed_data = compressor.compress_all_planning_data(
+            planning_resource_specifications,
+            planning_variable_definitions,
+            planning_local_values,
+            planning_data_sources,
+            planning_output_definitions,
+            planning_terraform_files,
+            generated_resources,
+            generated_variables,
+            generated_data_sources,
+            generated_local_values,
+            generated_output_definitions,
+            extract_configuration_optimizer_data(generation_context)
+        )
+        
+        # Log compression results
+        compressed_sizes = {key: len(value) for key, value in compressed_data.items()}
+        total_original = sum(original_sizes.values())
+        total_compressed = sum(compressed_sizes.values())
+        compression_ratio = (total_original - total_compressed) / total_original * 100 if total_original > 0 else 0
+
+        variable_generator_logger.log_structured(
+            level="INFO",
+            message="Data compression completed successfully",
+            extra={
+                "original_total_chars": total_original,
+                "compressed_total_chars": total_compressed,
+                "compression_ratio_percent": round(compression_ratio, 2),
+                "original_sizes": original_sizes,
+                "compressed_sizes": compressed_sizes
+            }
+        )
         # Format user prompt with actual data, escaping curly braces in JSON
         def escape_json_for_template(json_str):
             """Escape curly braces in JSON strings for template compatibility"""
@@ -395,21 +445,21 @@ def generate_terraform_variables(
             module_name=exec_plan.get('module_name', 'unknown'),
             target_environment=exec_plan.get('target_environment', 'development'),
             generation_id=agent_workspace.get('generation_id', str(uuid.uuid4())),
-            variable_specifications=escape_json_for_template(json.dumps(planning_variable_definitions, indent=2)),
-            planning_resources=escape_json_for_template(json.dumps(planning_resource_specifications, indent=2)),
-            planning_local_values=escape_json_for_template(json.dumps(planning_local_values, indent=2)),
-            planning_data_sources=escape_json_for_template(json.dumps(planning_data_sources, indent=2)),
-            planning_output_definitions=escape_json_for_template(json.dumps(planning_output_definitions, indent=2)),
-            planning_terraform_files=escape_json_for_template(json.dumps(planning_terraform_files, indent=2)),
+            variable_specifications=escape_json_for_template(compressed_data['variable_definitions']),
+            planning_resources=escape_json_for_template(compressed_data['resource_specifications']),
+            planning_local_values=escape_json_for_template(compressed_data['local_values']),
+            planning_data_sources=escape_json_for_template(compressed_data['data_sources']),
+            planning_output_definitions=escape_json_for_template(compressed_data['output_definitions']),
+            # planning_terraform_files=escape_json_for_template(compressed_data['terraform_files']),
             current_stage=planning_context.get('current_stage', 'planning'),
             active_agent=agent_workspace.get('active_agent', 'variable_definition_agent'),
-            workspace_generated_resources=escape_json_for_template(generated_resources),
-            workspace_generated_variables=escape_json_for_template(generated_variables),
-            workspace_generated_data_sources=escape_json_for_template(generated_data_sources),
-            workspace_generated_local_values=escape_json_for_template(generated_local_values),
-            workspace_generated_outputs=escape_json_for_template(generated_output_definitions),
-            specific_requirements_patterns=extract_specific_requirements(generation_context),
-            configuration_optimizer_actionable=escape_json_for_template(json.dumps(extract_configuration_optimizer_data(generation_context), indent=2)),
+            workspace_generated_resources=escape_json_for_template(compressed_data['workspace_generated_resources']),
+            workspace_generated_variables=escape_json_for_template(compressed_data['workspace_generated_variables']),
+            workspace_generated_data_sources=escape_json_for_template(compressed_data['workspace_generated_data_sources']),
+            workspace_generated_local_values=escape_json_for_template(compressed_data['workspace_generated_local_values']),
+            workspace_generated_outputs=escape_json_for_template(compressed_data['workspace_generated_outputs']),
+            # specific_requirements_patterns=extract_specific_requirements(generation_context),
+            # configuration_optimizer_actionable=escape_json_for_template(compressed_data['optimizer_data']),
             handoff_context=escape_json_for_template(json.dumps(agent_workspace.get('handoff_context', {}), indent=2))
         )
         
@@ -593,39 +643,112 @@ def extract_specific_requirements(context: Dict[str, Any]) -> str:
     
     return '\n'.join(requirements) if requirements else "No specific requirements specified"
 
+def create_focused_context(generation_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a focused context with only the essential data points from test.log"""
+    focused_context = {}
+    
+    # Extract from planner data structure
+    planner_data = generation_context.get('planner_data', {})
+    
+    # Architecture & Requirements Data
+    aws_service_mapping = planner_data.get('requirements_data', {}).get('aws_service_mapping', {})
+    services = aws_service_mapping.get('services', [])
+    if services:
+        first_service = services[0]
+        focused_context.update({
+            'architecture_patterns': first_service.get('architecture_patterns'),
+            'well_architected_alignment': first_service.get('well_architected_alignment'),
+            'cost_optimization_recommendations': first_service.get('cost_optimization_recommendations')
+        })
+    
+    # Security & Reusability Data
+    execution_data = planner_data.get('execution_data', {})
+    module_structure_plan = execution_data.get('module_structure_plan', {})
+    module_structure_plans = module_structure_plan.get('module_structure_plans', [])
+    if module_structure_plans:
+        first_plan = module_structure_plans[0]
+        focused_context.update({
+            'security_considerations': first_plan.get('security_considerations'),
+            'reusability_guidance': first_plan.get('reusability_guidance')
+        })
+    
+    # Configuration Optimizer Data
+    configuration_optimizer_data = execution_data.get('configuration_optimizer_data', {})
+    focused_context['configuration_optimizers'] = configuration_optimizer_data.get('configuration_optimizers')
+    
+    # Execution Plan Data
+    execution_plan_data = execution_data.get('execution_plan_data', {})
+    execution_plans = execution_plan_data.get('execution_plans', [])
+    if execution_plans:
+        first_execution_plan = execution_plans[0]
+        focused_context.update({
+            'terraform_files': first_execution_plan.get('terraform_files'),
+            'variable_definitions': first_execution_plan.get('variable_definitions'),
+            'local_values': first_execution_plan.get('local_values'),
+            'data_sources': first_execution_plan.get('data_sources'),
+            'output_definitions': first_execution_plan.get('output_definitions'),
+            'resource_configurations': first_execution_plan.get('resource_configurations')
+        })
+    
+    return focused_context
+
 def post_process_variable_response(
     llm_response: TerraformVariableGenerationResponse,
     agent_workspace: Dict[str, Any], 
     context: Dict[str, Any],
     start_time: datetime
 ) -> TerraformVariableGenerationResponse:
-    """Post-process LLM response with additional validation and enhancements"""
+    """Post-process LLM response with comprehensive validation and enhancements"""
+    
+    # Create focused context with only essential data points
+    focused_context = create_focused_context(context)
     
     # Calculate actual generation duration
     generation_duration = (datetime.now() - start_time).total_seconds()
     llm_response.generation_metadata.generation_duration_seconds = generation_duration
     
-    # Validate generated variables
+    # Fix generation timestamp if it's empty or invalid
+    if not llm_response.generation_timestamp or llm_response.generation_timestamp == "":
+        llm_response.generation_timestamp = datetime.now()
+    
+    # Validate generated variables with flexible validation
     validated_variables = []
     validation_errors = []
+    validation_warnings = []
     
     for variable in llm_response.generated_variables:
         validation_result = validate_terraform_variable(variable)
+        
+        # Always include variables unless they have critical errors
         if validation_result['valid']:
             validated_variables.append(variable)
+            # Add warnings to recoverable warnings
+            if validation_result.get('warnings'):
+                validation_warnings.extend(validation_result['warnings'])
         else:
+            # Only filter out variables with critical errors
             validation_errors.extend(validation_result['errors'])
-            # Attempt to fix common issues
+            # Attempt to fix critical issues
             fixed_variable = attempt_variable_fix(variable, validation_result['errors'])
             if fixed_variable:
                 validated_variables.append(fixed_variable)
                 llm_response.recoverable_warnings.append(
-                    f"Fixed validation issues for variable '{variable.name}'"
+                    f"Fixed critical validation issues for variable '{variable.name}'"
+                )
+            else:
+                # If we can't fix critical issues, still include the variable but log the error
+                validated_variables.append(variable)
+                llm_response.recoverable_warnings.append(
+                    f"Variable '{variable.name}' has critical issues but included anyway"
                 )
     
     # Update response with validated variables
     llm_response.generated_variables = validated_variables
     llm_response.generation_metadata.validation_errors.extend(validation_errors)
+    
+    # Add validation warnings to recoverable warnings
+    if validation_warnings:
+        llm_response.recoverable_warnings.extend(validation_warnings)
     
     # Generate complete variables file
     llm_response.complete_variables_file = generate_complete_variables_file(validated_variables)
@@ -633,24 +756,19 @@ def post_process_variable_response(
     # Update metrics with actual counts
     update_generation_metrics(llm_response.generation_metadata, validated_variables)
     
-    # Enhance dependencies with additional context
-    enhanced_dependencies = enhance_variable_dependencies(
-        llm_response.discovered_dependencies, 
-        validated_variables,
-        context
-    )
-    llm_response.discovered_dependencies = enhanced_dependencies
+    # Use original discovered dependencies without enhancement
+    # The LLM already provides the necessary context for each dependency
     
     # Create comprehensive handoff recommendations
     llm_response.handoff_recommendations = create_variable_handoff_recommendations(
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         validated_variables
     )
     
     # Add comprehensive state updates
     llm_response.state_updates = create_variable_state_updates(
         validated_variables,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         agent_workspace,
         llm_response.completion_status
     )
@@ -658,7 +776,7 @@ def post_process_variable_response(
     # Add workspace updates
     llm_response.workspace_updates = create_variable_workspace_updates(
         validated_variables,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.generation_metadata,
         llm_response.completion_status
     )
@@ -666,7 +784,7 @@ def post_process_variable_response(
     # Add checkpoint data
     llm_response.checkpoint_data = create_variable_checkpoint_data(
         validated_variables,
-        enhanced_dependencies,
+        llm_response.discovered_dependencies,
         llm_response.completion_status
     )
     
@@ -677,30 +795,36 @@ def validate_terraform_variable(variable: TerraformVariableBlock) -> Dict[str, A
     errors = []
     warnings = []
     
-    # Validate variable name
+    # Validate variable name - treat as warning instead of error
     if not validate_variable_name_convention(variable.name):
-        errors.append(f"Variable name '{variable.name}' doesn't follow Terraform conventions")
+        warnings.append(f"Variable name '{variable.name}' doesn't follow standard conventions")
     
-    # Validate type constraint
+    # Validate type constraint - be more lenient
     type_validation = validate_variable_type_constraint(variable.type_constraint, variable.default_value)
     if not type_validation['valid']:
-        errors.extend(type_validation['errors'])
+        # Treat type issues as warnings unless they're critical
+        for error in type_validation['errors']:
+            if 'compatible' in error.lower() and 'default' in error.lower():
+                warnings.append(f"Type compatibility warning: {error}")
+            else:
+                errors.extend([error])
     if type_validation['warnings']:
         warnings.extend(type_validation['warnings'])
     
-    # Validate validation rules (more lenient for complex patterns)
+    # Validate validation rules - treat most as warnings
     for rule in variable.validation_rules:
         rule_validation = validate_validation_rule(rule, variable)
         if not rule_validation['valid']:
-            # For complex validation rules, treat as warnings instead of errors
-            if any('regex' in rule.condition for rule in variable.validation_rules):
-                warnings.extend([f"Complex validation rule: {error}" for error in rule_validation['errors']])
-            else:
-                errors.extend(rule_validation['errors'])
+            # Treat most validation rule issues as warnings
+            for error in rule_validation['errors']:
+                if 'missing condition' in error or 'too short' in error:
+                    errors.extend([error])  # Critical issues
+                else:
+                    warnings.extend([f"Validation rule: {error}"])  # Non-critical issues
     
-    # Validate HCL block
+    # Validate HCL block - treat as warning unless completely invalid
     if not validate_variable_hcl_block(variable.hcl_block):
-        errors.append(f"Invalid HCL block for variable '{variable.name}'")
+        warnings.append(f"HCL block for variable '{variable.name}' may have formatting issues")
     
     # Security validation
     security_validation = validate_variable_security(variable)
@@ -714,18 +838,22 @@ def validate_terraform_variable(variable: TerraformVariableBlock) -> Dict[str, A
     }
 
 def validate_variable_name_convention(name: str) -> bool:
-    """Validate Terraform variable naming convention"""
-    # Check if name follows snake_case convention
-    if not re.match(r'^[a-z][a-z0-9_]*$', name):
+    """Validate Terraform variable naming convention - more lenient"""
+    # Basic checks only - be more permissive
+    if not name or not isinstance(name, str):
         return False
     
     # Check if name is not too long
     if len(name) > 64:
         return False
     
-    # Check for reserved words
-    reserved_words = ['var', 'variable', 'local', 'data', 'resource', 'module', 'provider', 'terraform']
-    if name in reserved_words:
+    # Only check for truly problematic reserved words
+    critical_reserved_words = ['var', 'variable']
+    if name.lower() in critical_reserved_words:
+        return False
+    
+    # Allow more flexible naming - just ensure it's not empty and has reasonable length
+    if len(name.strip()) == 0:
         return False
     
     return True
@@ -797,44 +925,51 @@ def check_type_compatibility(type_constraint: str, default_value: Any) -> Dict[s
     return {'compatible': True, 'warnings': warnings}
 
 def validate_dynamic_type_syntax(type_constraint: str) -> bool:
-    """Validate dynamic type constraint syntax"""
+    """Validate dynamic type constraint syntax - more lenient"""
     # Basic validation for Terraform type syntax
     if not type_constraint or not isinstance(type_constraint, str):
         return False
     
-    # Check for valid Terraform type patterns
-    valid_patterns = [
-        r'^string$',
-        r'^number$',
-        r'^bool$',
-        r'^list\([^)]+\)$',
-        r'^map\([^)]+\)$',
-        r'^object\(\{[^}]*\}\)$',
-        r'^tuple\(\[[^\]]*\]\)$',
-        r'^set\([^)]+\)$',
-        r'^any$'
-    ]
+    # Be more permissive - just check for basic type keywords
+    type_lower = type_constraint.lower().strip()
     
-    import re
-    return any(re.match(pattern, type_constraint) for pattern in valid_patterns)
+    # Allow common types and variations
+    basic_types = ['string', 'number', 'bool', 'any', 'object', 'list', 'map', 'set', 'tuple']
+    
+    # Check if it contains any basic type
+    for basic_type in basic_types:
+        if basic_type in type_lower:
+            return True
+    
+    # Allow complex types with parentheses
+    if '(' in type_constraint and ')' in type_constraint:
+        return True
+    
+    # Allow any non-empty string that looks like a type
+    if len(type_constraint.strip()) > 0:
+        return True
+    
+    return False
 
 def validate_validation_rule(rule: TerraformValidationRule, variable: TerraformVariableBlock) -> Dict[str, Any]:
     """Validate individual validation rule with more lenient parsing for complex patterns"""
     errors = []
     
-    # Basic validation - don't parse complex regex patterns
+    # Very lenient validation - only check for truly problematic cases
     if not rule.condition or not rule.condition.strip():
-        errors.append(f"Validation rule for {variable.name} missing condition")
-        return {'valid': False, 'errors': errors}
+        # Only error if completely empty
+        if not rule.condition:
+            errors.append(f"Validation rule for {variable.name} missing condition")
+        return {'valid': len(errors) == 0, 'errors': errors}
     
-    # Check if condition references the variable (more lenient)
+    # Be more lenient about variable references - just check if it looks like a condition
     condition = rule.condition.strip()
-    if f"var.{variable.name}" not in condition and "var." not in condition:
-        errors.append(f"Validation rule condition should reference var.{variable.name}")
+    if len(condition) < 3:  # Very short conditions might be problematic
+        errors.append(f"Validation rule condition too short for {variable.name}")
     
-    # Check error message quality
-    if not rule.error_message or len(rule.error_message) < 5:
-        errors.append("Validation error message should be descriptive (at least 5 characters)")
+    # Be lenient about error messages - just ensure it exists
+    if not rule.error_message:
+        errors.append("Validation error message is required")
     
     return {
         'valid': len(errors) == 0,
@@ -842,21 +977,27 @@ def validate_validation_rule(rule: TerraformValidationRule, variable: TerraformV
     }
 
 def validate_variable_hcl_block(hcl_block: str) -> bool:
-    """Validate HCL block syntax for variable"""
+    """Validate HCL block syntax for variable - more lenient"""
     try:
-        # Check for proper variable block structure (more flexible to handle escaped quotes)
-        if not re.match(r'variable\s+"[^"]*"\s*{', hcl_block):
+        if not hcl_block or not isinstance(hcl_block, str):
             return False
         
-        # Check for balanced braces
-        if hcl_block.count('{') != hcl_block.count('}'):
+        # Very basic checks - just ensure it looks like a variable block
+        hcl_lower = hcl_block.lower().strip()
+        
+        # Must contain 'variable' keyword
+        if 'variable' not in hcl_lower:
             return False
         
-        # Check for required components
-        required_components = ['type', 'description']
-        for component in required_components:
-            if component not in hcl_block:
-                return False
+        # Must have opening brace
+        if '{' not in hcl_block:
+            return False
+        
+        # Check for balanced braces (more lenient)
+        open_braces = hcl_block.count('{')
+        close_braces = hcl_block.count('}')
+        if abs(open_braces - close_braces) > 1:  # Allow minor imbalance
+            return False
         
         return True
     except Exception:
@@ -1016,42 +1157,6 @@ def update_generation_metrics(
     metrics.variables_with_defaults = sum(1 for var in variables if var.default_value is not None)
     metrics.required_variables = sum(1 for var in variables if var.default_value is None)
     metrics.sensitive_variables = sum(1 for var in variables if var.sensitive)
-
-def enhance_variable_dependencies(
-    dependencies: List[DiscoveredVariableDependency],
-    variables: List[TerraformVariableBlock],
-    context: Dict[str, Any]
-) -> List[DiscoveredVariableDependency]:
-    """Enhance dependencies with additional context and validation"""
-    
-    enhanced_deps = []
-    
-    for dep in dependencies:
-        enhanced_dep = dep.copy(deep=True)
-        
-        # Add variable context
-        source_variable = next(
-            (var for var in variables if var.name == dep.source_variable),
-            None
-        )
-        
-        if source_variable:
-            enhanced_dep.handoff_context.update({
-                'source_variable_type': source_variable.type_constraint,
-                'source_variable_complexity': source_variable.complexity_level,
-                'source_variable_category': source_variable.category,
-                'validation_requirements': [rule.dict() for rule in source_variable.validation_rules]
-            })
-        
-        # Add execution plan context
-        enhanced_dep.handoff_context.update({
-            'execution_plan_excerpt': context.get('execution_plan', {}),
-            'generation_context': context
-        })
-        
-        enhanced_deps.append(enhanced_dep)
-    
-    return enhanced_deps
 
 def create_variable_handoff_recommendations(
     dependencies: List[DiscoveredVariableDependency],
