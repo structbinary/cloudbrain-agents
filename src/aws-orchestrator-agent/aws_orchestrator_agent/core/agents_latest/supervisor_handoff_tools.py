@@ -271,7 +271,6 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
                 "task_id": task_id,
                 "planner_data": state_dict.get("planner_data"),
             }
-            
             # Log the transformation node wrapper approach
             handoff_logger.log_structured(
                 level="DEBUG",
@@ -284,6 +283,25 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
                     "has_planner_data": state_update.get("planner_data") is not None,
                     "note": "Minimal state passed - StateTransformer only needs planner_data, session_id, task_id",
                     "architecture": "transformation_node_wrapper"
+                }
+            )
+        elif agent_name == "writer_react_agent":
+            # For writer_react_agent, pass only what StateTransformer.supervisor_to_writer_react_agent needs
+            writer_react_state = StateTransformer.supervisor_to_writer_react(state_dict)
+            state_update = writer_react_state.model_dump()
+            state_update["messages"] = messages + [tool_message]
+            # Log the transformation node wrapper approach
+            handoff_logger.log_structured(
+                level="DEBUG",
+                message=f"Using minimal state for {agent_name}",
+                extra={
+                    "agent_name": agent_name,
+                    "transformation_method": "minimal_state",
+                    "state_update_keys": list(state_update.keys()),
+                    "messages_count": len(state_update.get("messages", [])),
+                    "has_generation_data": state_update.get("generation_data") is not None,
+                    "note": "Minimal state passed - StateTransformer only needs generation_data, session_id, task_id",
+                    "architecture": "minimal_state"
                 }
             )
         else:
@@ -307,7 +325,7 @@ def create_custom_handoff_tool(*, agent_name: str, name: str | None, description
             }
         
         # Log what we're excluding (only for non-transformed agents)
-        if agent_name not in ["planner_sub_supervisor", "generator_swarm"] and "workflow_state" in state_dict:
+        if agent_name not in ["planner_sub_supervisor", "generator_swarm", "writer_react_agent"] and "workflow_state" in state_dict:
             handoff_logger.log_structured(
                 level="DEBUG",
                 message=f"Excluding workflow_state from handoff to {agent_name}",

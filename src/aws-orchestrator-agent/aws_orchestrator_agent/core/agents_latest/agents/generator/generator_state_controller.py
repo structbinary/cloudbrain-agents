@@ -30,7 +30,9 @@ class GeneratorStageController:
                     "variable_definition_agent": 0.0,
                     "data_source_agent": 0.0,
                     "local_values_agent": 0.0,
-                    "output_definition_agent": 0.0
+                    "output_definition_agent": 0.0,
+                    "terraform_backend_generator": 0.0,
+                    "terraform_readme_generator": 0.0
                 }
             },
             graph=Command.PARENT
@@ -44,11 +46,13 @@ class GeneratorStageController:
             
         # Weighted completion based on criticality
         weights = {
-            "resource_configuration_agent": 0.4,  # Most critical
-            "variable_definition_agent": 0.3,
-            "data_source_agent": 0.2,
-            "local_values_agent": 0.05,
-            "output_definition_agent": 0.05
+            "resource_configuration_agent": 0.30,  # Core infrastructure - highest
+            "variable_definition_agent": 0.25,     # Core configuration - high
+            "data_source_agent": 0.20,            # Data dependencies - medium-high
+            "local_values_agent": 0.15,           # Computed values - medium
+            "output_definition_agent": 0.10,      # Output definitions - low
+            "terraform_backend_generator": 0.00,  # Backend configuration - supporting
+            "terraform_readme_generator": 0.00    # Documentation - supporting
         }
         
         weighted_sum = sum(
@@ -66,11 +70,13 @@ class GeneratorStageController:
             
         # Weighted completion based on criticality
         weights = {
-            "resource_configuration_agent": 0.4,  # Most critical
-            "variable_definition_agent": 0.3,
-            "data_source_agent": 0.2,
-            "local_values_agent": 0.05,
-            "output_definition_agent": 0.05
+            "resource_configuration_agent": 0.30,  # Core infrastructure - highest
+            "variable_definition_agent": 0.25,     # Core configuration - high
+            "data_source_agent": 0.20,            # Data dependencies - medium-high
+            "local_values_agent": 0.15,           # Computed values - medium
+            "output_definition_agent": 0.10,      # Output definitions - low
+            "terraform_backend_generator": 0.00,  # Backend configuration - supporting
+            "terraform_readme_generator": 0.00    # Documentation - supporting
         }
         
         weighted_sum = sum(
@@ -88,7 +94,9 @@ class GeneratorStageController:
             "variable_definition_agent", 
             "data_source_agent",
             "local_values_agent",
-            "output_definition_agent"
+            "output_definition_agent",
+            "terraform_backend_generator",
+            "terraform_readme_generator"
         ]
         
         agents_completed = all(
@@ -125,7 +133,9 @@ class GeneratorStageController:
             "variable_definition_agent", 
             "data_source_agent",
             "local_values_agent",
-            "output_definition_agent"
+            "output_definition_agent",
+            "terraform_backend_generator",
+            "terraform_readme_generator"
         ]
         
         agents_completed = all(
@@ -241,7 +251,9 @@ class GeneratorStageController:
                 "variable_definition_agent", 
                 "data_source_agent",
                 "local_values_agent",
-                "output_definition_agent"
+                "output_definition_agent",
+                "terraform_backend_generator",
+                "terraform_readme_generator"
             ]
             
             for agent in required_agents:
@@ -321,12 +333,15 @@ class GeneratorStageController:
                 "variable_definition_agent", 
                 "data_source_agent",
                 "local_values_agent",
-                "output_definition_agent"
+                "output_definition_agent",
+                "terraform_backend_generator",
+                "terraform_readme_generator"
             ]
             
             for agent in required_agents:
                 # Get status from matrix, default to INACTIVE if not present
                 status = agent_status_matrix.get(agent, GeneratorAgentStatus.INACTIVE)
+                
                 
                 if status in [GeneratorAgentStatus.INACTIVE, GeneratorAgentStatus.WAITING]:
                     dependencies_met = self.check_agent_dependencies_met_from_params(
@@ -337,6 +352,7 @@ class GeneratorStageController:
                             agent, agent_waiting_times
                         )
                         ready_agents.append((agent, priority))
+            
             
             if ready_agents:
                 # Return highest priority agent
@@ -410,16 +426,71 @@ class GeneratorStageController:
                 
         return True
     
+    def ensure_complete_status_matrix(self, current_status_matrix: dict) -> dict:
+        """Ensure all required agents are in the status matrix with proper statuses"""
+        required_agents = [
+            "resource_configuration_agent",
+            "variable_definition_agent", 
+            "data_source_agent",
+            "local_values_agent",
+            "output_definition_agent",
+            "terraform_backend_generator",
+            "terraform_readme_generator"
+        ]
+        
+        # Initialize missing agents with INACTIVE status and normalize existing ones
+        complete_status_matrix = {}
+        for agent in required_agents:
+            if agent in current_status_matrix:
+                # Normalize string statuses to enum statuses
+                status = current_status_matrix[agent]
+                if isinstance(status, str):
+                    # Convert string to enum
+                    if status == 'inactive':
+                        complete_status_matrix[agent] = GeneratorAgentStatus.INACTIVE
+                    elif status == 'active':
+                        complete_status_matrix[agent] = GeneratorAgentStatus.ACTIVE
+                    elif status == 'waiting':
+                        complete_status_matrix[agent] = GeneratorAgentStatus.WAITING
+                    elif status == 'completed':
+                        complete_status_matrix[agent] = GeneratorAgentStatus.COMPLETED
+                    elif status == 'error':
+                        complete_status_matrix[agent] = GeneratorAgentStatus.ERROR
+                    else:
+                        complete_status_matrix[agent] = GeneratorAgentStatus.INACTIVE
+                else:
+                    # Already an enum, use as-is
+                    complete_status_matrix[agent] = status
+            else:
+                complete_status_matrix[agent] = GeneratorAgentStatus.INACTIVE
+        
+        return complete_status_matrix
+    
+    def merge_status_matrix(self, current_status_matrix: dict, updates: dict) -> dict:
+        """Merge status matrix updates while preserving existing statuses"""
+        # Ensure complete status matrix first
+        complete_matrix = self.ensure_complete_status_matrix(current_status_matrix)
+        
+        # Merge with updates
+        merged_matrix = {
+            **complete_matrix,
+            **updates
+        }
+        
+        return merged_matrix
+
     def get_agent_priority(self, agent_name: str, state: GeneratorSwarmState) -> int:
         """Calculate agent priority based on criticality and current state"""
         try:
             # Define priority weights (higher = more important)
             priority_weights = {
-                "resource_configuration_agent": 4,  # Highest priority
-                "variable_definition_agent": 3,
-                "data_source_agent": 2,
-                "local_values_agent": 1,
-                "output_definition_agent": 1
+                "resource_configuration_agent": 6,  # Highest priority - core infrastructure
+                "variable_definition_agent": 5,     # High priority - core configuration
+                "data_source_agent": 4,            # Medium-high priority - data dependencies
+                "local_values_agent": 3,           # Medium priority - computed values
+                "output_definition_agent": 4,      # Medium-high priority - outputs
+                "terraform_backend_generator": 1,  # Lowest priority - supporting backend
+                "terraform_readme_generator": 1   # Lowest priority - supporting documentation
             }
             
             base_priority = priority_weights.get(agent_name, 0)
@@ -463,11 +534,13 @@ class GeneratorStageController:
         try:
             # Define priority weights (higher = more important)
             priority_weights = {
-                "resource_configuration_agent": 4,  # Highest priority
-                "variable_definition_agent": 3,
-                "data_source_agent": 2,
-                "local_values_agent": 1,
-                "output_definition_agent": 1
+                "resource_configuration_agent": 6,  # Highest priority - core infrastructure
+                "variable_definition_agent": 5,     # High priority - core configuration
+                "data_source_agent": 4,            # Medium-high priority - data dependencies
+                "local_values_agent": 3,           # Medium priority - computed values
+                "output_definition_agent": 4,      # Medium-high priority - outputs
+                "terraform_backend_generator": 1,  # Lowest priority - supporting backend
+                "terraform_readme_generator": 1   # Lowest priority - supporting documentation
             }
             
             base_priority = priority_weights.get(agent_name, 0)
@@ -531,7 +604,10 @@ class GeneratorStageController:
                 "resource_configuration_agent",
                 "variable_definition_agent", 
                 "data_source_agent",
-                "local_values_agent"
+                "local_values_agent",
+                "output_definition_agent",
+                "terraform_backend_generator",
+                "terraform_readme_generator"
             ]
             
             for agent in required_agents:

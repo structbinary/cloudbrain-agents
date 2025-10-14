@@ -19,7 +19,7 @@ from langgraph.graph.message import add_messages
 
 # Import generator types for StateTransformer
 from .agents.generator.generator_state import GeneratorSwarmState, GeneratorAgentStatus
-
+from .agents.writer.writer_react_agent import WriterReactState, WriteStatus
 
 
 
@@ -120,7 +120,7 @@ class AgentType(str, Enum):
     """Agent type enumeration."""
     PLANNER = "planner"
     GENERATION = "generation"
-    VALIDATION = "validation"
+    WRITER = "writer"
     EDITOR = "editor"
     SECURITY = "security"
     COST = "cost"
@@ -143,7 +143,7 @@ class SupervisorWorkflowState(BaseModel):
     # Phase completion tracking
     planning_complete: bool = Field(default=False, description="Planning phase complete")
     generation_complete: bool = Field(default=False, description="Generation phase complete")
-    validation_complete: bool = Field(default=False, description="Validation phase complete")
+    writer_complete: bool = Field(default=False, description="Writer phase complete")
     editing_complete: bool = Field(default=False, description="Editing phase complete")
     
     # Workflow control
@@ -165,7 +165,8 @@ class SupervisorWorkflowState(BaseModel):
         # Validation and editing are optional based on requirements
         return all([
             self.planning_complete,
-            self.generation_complete
+            self.generation_complete,
+            self.writer_complete
         ])
     
     @property
@@ -175,10 +176,10 @@ class SupervisorWorkflowState(BaseModel):
             return "planning"
         elif not self.generation_complete:
             return "generation"
-        elif not self.validation_complete:
-            return "validation"  # Optional phase
+        elif not self.writer_complete:
+            return "writer"
         elif not self.editing_complete:
-            return "editing"  # Optional phase
+            return "editing"
         else:
             return None  # All phases complete
     
@@ -195,8 +196,8 @@ class SupervisorWorkflowState(BaseModel):
             self.planning_complete = True
         elif phase == "generation":
             self.generation_complete = True
-        elif phase == "validation":
-            self.validation_complete = True
+        elif phase == "writer":
+            self.writer_complete = True
         elif phase == "editing":
             self.editing_complete = True
         
@@ -223,7 +224,7 @@ class SupervisorWorkflowState(BaseModel):
             "current_phase": self.current_phase,
             "planning_complete": self.planning_complete,
             "generation_complete": self.generation_complete,
-            "validation_complete": self.validation_complete,
+            "writer_complete": self.writer_complete,
             "editing_complete": self.editing_complete,
             "workflow_complete": self.workflow_complete,
             "loop_counter": self.loop_counter,
@@ -319,7 +320,7 @@ class SupervisorState(BaseModel):
     # Agent-specific state data (for coordination)
     planner_data: Optional[Dict[str, Any]] = None
     generation_data: Optional[Dict[str, Any]] = None
-    validation_data: Optional[Dict[str, Any]] = None
+    writer_data: Optional[Dict[str, Any]] = None
     editor_data: Optional[Dict[str, Any]] = None
     security_data: Optional[Dict[str, Any]] = None
     cost_data: Optional[Dict[str, Any]] = None
@@ -627,7 +628,38 @@ class StateTransformer:
             security_considerations=primary_execution_plan.get("security_considerations", []),
             cost_estimates=primary_execution_plan.get("estimated_costs", {})
         )
-    
+
+    @staticmethod
+    def supervisor_to_writer_react(supervisor_state: SupervisorState) -> WriterReactState:
+        """Transform supervisor state to writer react state."""
+
+        if isinstance(supervisor_state, dict):
+            generation_data = supervisor_state.get("generation_data", {})
+            planner_data = supervisor_state.get("planner_data", {})
+            session_id = supervisor_state.get("session_id", None)
+            task_id = supervisor_state.get("task_id", None)
+        else:
+            generation_data = supervisor_state.generation_data
+            planner_data = supervisor_state.planner_data
+            session_id = supervisor_state.session_id
+            task_id = supervisor_state.task_id
+
+        module_structure_plan = planner_data.get("execution_data", {}).get("module_structure_plan", {}).get("module_structure_plans", [])[0].get("recommended_files", [])
+        module_name = planner_data.get("execution_data", {}).get("execution_plan_data", {}).get("execution_plans", [])[0].get("module_name", "terraform-module")
+
+        return WriterReactState(
+            module_name=module_name,
+            session_id=session_id,
+            task_id=task_id,
+            generation_data=generation_data,
+            module_structure_plan=module_structure_plan,
+            files_to_write=[],  # Will be populated by _process_generation_data
+            status=WriteStatus.PENDING,
+            errors=[],
+            warnings=[],
+            retry_count=0
+        )
+
     @staticmethod
     def supervisor_to_generator_swarm(supervisor_state: SupervisorState) -> GeneratorSwarmState:
         """Transform supervisor state to generator swarm state with actual planner output structure."""
@@ -673,7 +705,9 @@ class StateTransformer:
                 "variable_definition_agent": 0.0,
                 "data_source_agent": 0.0,
                 "local_values_agent": 0.0,
-                "output_definition_agent": 0.0
+                "output_definition_agent": 0.0,
+                "terraform_backend_generator": 0.0,
+                "terraform_readme_generator": 0.0
             },
             messages=[default_message],
             llm_input_messages=[default_message],
@@ -682,7 +716,9 @@ class StateTransformer:
                 "variable_definition_agent": GeneratorAgentStatus.INACTIVE,
                 "data_source_agent": GeneratorAgentStatus.INACTIVE,
                 "local_values_agent": GeneratorAgentStatus.INACTIVE,
-                "output_definition_agent": GeneratorAgentStatus.INACTIVE
+                "output_definition_agent": GeneratorAgentStatus.INACTIVE,
+                "terraform_backend_generator": GeneratorAgentStatus.INACTIVE,
+                "terraform_readme_generator": GeneratorAgentStatus.INACTIVE
             },
             # Required fields with defaults
             pending_dependencies={},
@@ -693,7 +729,9 @@ class StateTransformer:
                 "variable_definition_agent": {},
                 "data_source_agent": {},
                 "local_values_agent": {},
-                "output_definition_agent": {}
+                "output_definition_agent": {},
+                "terraform_backend_generator": {},
+                "terraform_readme_generator": {}
             },
             session_id=session_id,
             task_id=task_id,
@@ -771,32 +809,65 @@ class StateTransformer:
         """
         # Extract generated content from agent workspaces with safe access
         agent_workspaces = generator_state.get("agent_workspaces", {})
-        generated_resources = agent_workspaces.get("resource_configuration_agent", {}).get("generated_resources", [])
-        generated_variables = agent_workspaces.get("variable_definition_agent", {}).get("generated_variables", [])
-        generated_data_sources = agent_workspaces.get("data_source_agent", {}).get("generated_data_sources", [])
-        generated_locals = agent_workspaces.get("local_values_agent", {}).get("generated_locals", [])
-        generated_outputs = agent_workspaces.get("output_definition_agent", {}).get("generated_outputs", [])
-        
+        generated_resources_block = agent_workspaces.get("resource_configuration_agent", {}).get("complete_resources_file", "")
+        generated_variables_block = agent_workspaces.get("variable_definition_agent", {}).get("complete_variables_file", "")
+        generated_data_sources_block = agent_workspaces.get("data_source_agent", {}).get("complete_data_sources_file", "")
+        generated_locals_block = agent_workspaces.get("local_values_agent", {}).get("complete_locals_file", "")
+        generated_outputs_block = agent_workspaces.get("output_definition_agent", {}).get("complete_outputs_file", "")
+        generated_backend_block = agent_workspaces.get("terraform_backend_generator", {}).get("complete_configuration", "")
+        generated_readme_block = agent_workspaces.get("terraform_readme_generator", {}).get("readme_content", "")
+        generation_completion_msg = HumanMessage(content=f"Module Generation completed for module: {generator_state.get('generation_context', {}).get('module_name', 'Unknown')}")
         # Create generation data for supervisor
         generation_data = {
             "generated_module": {
-                "resources": generated_resources,
-                "variables": generated_variables,
-                "data_sources": generated_data_sources,
-                "locals": generated_locals,
-                "outputs": generated_outputs
+                "resources": generated_resources_block,
+                "variables": generated_variables_block,
+                "data_sources": generated_data_sources_block,
+                "locals": generated_locals_block,
+                "outputs": generated_outputs_block,
+                "backend": generated_backend_block,
+                "readme": generated_readme_block
             },
-            "generation_metrics": generator_state.get("completion_metrics", {}),
-            "generation_context": generator_state.get("generation_context", {}),
+            "agent_status_matrix": generator_state.get("agent_status_matrix", {}),
             "status": "completed" if generator_state.get("stage_status") == "planning_complete" else "in_progress"
         }
         
         # Return supervisor updates
         return {
             "generation_data": generation_data,
-            "status": "completed" if generator_state.get("stage_status") == "planning_complete" else "in_progress",
-            "current_agent": None,  # Generation complete
-            "messages": generator_state.get("internal_messages", [])  # Pass messages back to supervisor
+            "messages": generator_state.get("messages", []),
+            "llm_input_messages": [generation_completion_msg]  # Pass messages back to supervisor
+        }
+    
+    @staticmethod
+    def writer_to_supervisor(writer_state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Transform writer state back to supervisor updates.
+
+        Args:
+            writer_state: Final writer state
+
+        Returns:
+            Dict[str, Any]: Updates to merge into supervisor state
+        """
+        # Extract completion data from writer state
+        completion_status = writer_state.get("completion_status", "completed")
+        completion_summary = writer_state.get("completion_summary", "")
+        completion_files_created = writer_state.get("completion_files_created", [])
+
+        writer_completion_msg = HumanMessage(content=f"Writer agent execution completed successfully and has written the following files: {completion_files_created}")
+
+        # Create writer data for supervisor
+        writer_data = {
+            "status": completion_status,
+            "summary": completion_summary,
+            "files_created": completion_files_created
+        }
+
+        # Return supervisor updates
+        return {
+            "writer_data": writer_data,
+            "llm_input_messages": [writer_completion_msg]
         }
     
     @staticmethod

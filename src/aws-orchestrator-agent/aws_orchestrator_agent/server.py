@@ -26,6 +26,7 @@ from aws_orchestrator_agent.core import (
 from aws_orchestrator_agent.core.agents_latest.supervisor_agent import create_supervisor_agent
 from aws_orchestrator_agent.core.agents_latest.agents.planner import create_planner_sub_supervisor_agent
 from aws_orchestrator_agent.core.agents_latest.agents.generator.generator_swarm import create_generator_swarm_agent
+from aws_orchestrator_agent.core.agents_latest.agents.writer.writer_react_agent import create_writer_react_agent
 from aws_orchestrator_agent.core.task_lifecycle import TaskLifecycleManager
 from aws_orchestrator_agent.utils.logger import AgentLogger, log_sync
 
@@ -80,10 +81,13 @@ def main(host: str, port: int, agent_card: str, config_file: str) -> None:
         
         # Create Generator Swarm Agent
         generator_swarm = create_generator_swarm_agent(config=config)
+
+        # Create Writer React Agent
+        writer_react = create_writer_react_agent(config=config)
         
         # Create Custom Supervisor Agent with agents
         supervisor_agent = create_supervisor_agent(
-            agents=[planner_sub_supervisor, generator_swarm],
+            agents=[planner_sub_supervisor, generator_swarm, writer_react],
             config=config,
             name="aws-orchestrator-supervisor"
         )

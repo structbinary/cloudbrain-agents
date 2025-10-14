@@ -106,19 +106,6 @@ Example:
                     resource_workspace = previous_state["agent_workspaces"].get(active_agent, {})
                     discovered_dependencies = resource_workspace.get("pending_dependencies", [])
                     handoff_recommendations = resource_workspace.get("handoff_recommendations", [])
-                # if active_agent == "resource_configuration_agent":
-                #     resource_generator_tool_msg = None
-                # messages = state["messages"][-3:]
-                # for msg in messages:
-                #     if isinstance(msg, ToolMessage) and hasattr(msg, 'content'):
-                #         content = msg.content
-                #         parsed_data = self._parse_tool_message_content(content)
-                #         if parsed_data:
-                #             tool_response = parsed_data
-                #             break
-                # if tool_response:
-                #     discovered_dependencies = tool_response.get("discovered_dependencies", [])
-                #     handoff_recommendations = tool_response.get("handoff_recommendations", [])
 
                 source_agent = active_agent
                 
@@ -137,6 +124,9 @@ Example:
                 
                 # Transform handoff recommendations data for target agent context
                 transformed_dependency_data = discovered_dependencies
+                dependencies = []  # Initialize dependencies as empty list
+                context_payload = {}  # Initialize context_payload as empty dict
+                
                 if handoff_recommendations:
                     # Find the specific recommendation for our target agent
                     target_rec = None
@@ -149,25 +139,6 @@ Example:
                         context_payload = target_rec.get("context_payload", {})
                         dependencies = context_payload.get("dependencies", [])
                         # affected_resources = context_payload.get("affected_resources", [])
-                        
-                        # Transform to match create_target_agent_context expectations
-                        # transformed_dependency_data = {
-                        #     "resources": [
-                        #         {"resource_name": resource, "resource_type": "aws_resource"} 
-                        #         for resource in affected_resources
-                        #     ],
-                        #     "variable_specs": [
-                        #         {
-                        #             "name": dep.get("dependency_id", "").replace("var.", ""),
-                        #             "type": list(dep.get("expected_response", {}).values())[0] if dep.get("expected_response") else "string",
-                        #             "description": f"Variable for {dep.get('source_resource', '')}",
-                        #             "source_resource": dep.get("source_resource", ""),
-                        #             "priority_level": dep.get("priority_level", 3),
-                        #             "is_blocking": dep.get("is_blocking", True)
-                        #         }
-                        #         for dep in dependencies
-                        #     ]
-                        # }
                 
                 # Create dependency request (keep original dependency_data for tracking)
                 dependency_request = {
@@ -184,7 +155,7 @@ Example:
                 }
             
                 # Update dependency tracking (defensive handling for missing keys)
-                current_pending_deps = state.get("pending_dependencies", {})
+                current_pending_deps = previous_state.get("pending_dependencies", {})
                 updated_pending_deps = {
                     **current_pending_deps,
                     target_agent: [
@@ -194,7 +165,7 @@ Example:
                 }
                 
                 # Update dependency graph (defensive handling for missing keys)
-                current_dep_graph = state.get("dependency_graph", {})
+                current_dep_graph = previous_state.get("dependency_graph", {})
                 updated_dep_graph = {
                     **current_dep_graph,
                     target_agent: {
@@ -204,14 +175,17 @@ Example:
                 }
                 
                 # Update agent status (defensive handling for missing keys)
-                current_status_matrix = state.get("agent_status_matrix", {})
-                updated_status_matrix = {
-                    **current_status_matrix,
-                    target_agent: GeneratorAgentStatus.ACTIVE
-                }
-                
+                current_status_matrix = previous_state.get("agent_status_matrix", {})
+                # Use controller utility to ensure complete status matrix and merge properly
+                controller = GeneratorStageController()
+                status_updates = {target_agent: GeneratorAgentStatus.ACTIVE}
                 if blocking:
-                    updated_status_matrix[source_agent] = GeneratorAgentStatus.WAITING
+                    status_updates[source_agent] = GeneratorAgentStatus.WAITING
+                
+                updated_status_matrix = controller.merge_status_matrix(
+                    current_status_matrix,
+                    status_updates
+                )
                 
                 # Create context for target agent with transformed data
                 # target_context = self.create_target_agent_context(
@@ -260,30 +234,39 @@ Example:
                             "pending_dependencies": updated_pending_deps,
                             "dependency_graph": updated_dep_graph,
                             "agent_workspaces": {
-                                **state.get("agent_workspaces", {}),
+                                **previous_state.get("agent_workspaces", {}),
                                 target_agent: {
-                                    **state.get("agent_workspaces", {}).get(target_agent, {}),
+                                    **previous_state.get("agent_workspaces", {}).get(target_agent, {}),
                                     "current_task": dependency_request,
                                     "context": target_context
                                 }
                             },
                             "handoff_queue": [
-                                *state.get("handoff_queue", []),
+                                *previous_state.get("handoff_queue", []),
                                 dependency_request
                             ]
                         }
                     }
                 )
+                # Get current state and merge the status matrix properly using controller utility
+                # current_global_state = get_current_state()
+                current_agent_status_matrix = previous_state.get("agent_status_matrix", {})
+                
+                # Use controller utility to merge properly
+                merged_status_matrix = controller.merge_status_matrix(
+                    current_agent_status_matrix,
+                    updated_status_matrix
+                )
+                
                 update_current_state({
                     "active_agent": target_agent,
-                    "agent_status_matrix": updated_status_matrix,
+                    "agent_status_matrix": merged_status_matrix,
                     "pending_dependencies": updated_pending_deps,
                     "dependency_graph": updated_dep_graph,
                     "handoff_queue": [
-                        *state.get("handoff_queue", []),
+                        *previous_state.get("handoff_queue", []),
                         dependency_request
                     ]
-
                 })
 
                 return Command(
@@ -295,15 +278,15 @@ Example:
                         "pending_dependencies": updated_pending_deps,
                         "dependency_graph": updated_dep_graph,
                         "agent_workspaces": {
-                            **state.get("agent_workspaces", {}),
+                            **previous_state.get("agent_workspaces", {}),
                             target_agent: {
-                                **state.get("agent_workspaces", {}).get(target_agent, {}),
+                                **previous_state.get("agent_workspaces", {}).get(target_agent, {}),
                                 "current_task": dependency_request,
                                 "context": target_context
                             }
                         },
                         "handoff_queue": [
-                            *state.get("handoff_queue", []),
+                            *previous_state.get("handoff_queue", []),
                             dependency_request
                         ]
                     },
@@ -341,10 +324,10 @@ Example:
                 return Command(
                     goto="resource_configuration_agent",
                     update={
-                        "messages": [*state.get("messages", []), fallback_tool_message, fallback_human_message],
+                        "messages": [*previous_state.get("messages", []), fallback_tool_message, fallback_human_message],
                         "active_agent": "resource_configuration_agent",
                         "agent_status_matrix": {
-                            **state.get("agent_status_matrix", {}),
+                            **previous_state.get("agent_status_matrix", {}),
                             "resource_configuration_agent": GeneratorAgentStatus.ACTIVE
                         },
                     },
@@ -571,6 +554,9 @@ def create_completion_handoff_tool(source_agent: str):
     - Data Source Agent: Pass generated_data_sources list
     - Local Values Agent: Pass generated_locals list
     - Output Definition Agent: Pass generated_outputs list
+    - Terraform Readme Agent: Pass readme_content list
+    - Terraform Backend Agent: Pass backend_config list
+
     """
     
     logger = AgentLogger("GeneratorStageHandoffManager")
@@ -593,10 +579,29 @@ def create_completion_handoff_tool(source_agent: str):
             global_state = get_current_state()
             # Update agent status to completed (defensive handling for missing keys)
             current_status_matrix = global_state.get("agent_status_matrix", {})
-            updated_status_matrix = {
-                **current_status_matrix,
-                source_agent: GeneratorAgentStatus.COMPLETED
-            }
+            
+            
+            # Use controller utility to ensure complete status matrix and merge properly
+            controller = GeneratorStageController()
+            updated_status_matrix = controller.merge_status_matrix(
+                current_status_matrix, 
+                {source_agent: GeneratorAgentStatus.COMPLETED}
+            )
+            
+            # CRITICAL FIX: Update the global state immediately with the complete status matrix
+            # Get current state and merge the status matrix properly
+            current_global_state = get_current_state()
+            current_agent_status_matrix = current_global_state.get("agent_status_matrix", {})
+            
+            # Use controller utility to merge with global state
+            merged_status_matrix = controller.merge_status_matrix(
+                current_agent_status_matrix,
+                updated_status_matrix
+            )
+            
+            update_current_state({
+                "agent_status_matrix": merged_status_matrix
+            })
             
             # Move resolved dependencies from pending to resolved (defensive handling)
             current_resolved_deps = global_state.get("resolved_dependencies", {})
@@ -644,6 +649,7 @@ def create_completion_handoff_tool(source_agent: str):
             active_agent = global_state.get("active_agent")
             agent_waiting_times = global_state.get("agent_waiting_times", {})
             
+            
             next_agent = controller.determine_next_active_agent_from_params(
                 agent_status_matrix=updated_status_matrix,  # Use updated status matrix
                 dependency_graph=dependency_graph,
@@ -687,7 +693,7 @@ def create_completion_handoff_tool(source_agent: str):
                 )
                 
                 return Command(
-                    goto="check_planning_stage_completion",
+                    goto="supervisor",
                     update={
                         "messages": [*state.get("messages", []), completion_tool_message],
                         "agent_status_matrix": updated_status_matrix,
@@ -726,12 +732,15 @@ def create_completion_handoff_tool(source_agent: str):
                     }
                 )
 
+                # Simply update the next agent to ACTIVE in the already-merged status matrix
+                final_status_matrix = {
+                    **merged_status_matrix,  # Use the already-merged matrix
+                    next_agent: GeneratorAgentStatus.ACTIVE
+                }
+                
                 update_current_state({
                     "active_agent": next_agent,
-                    "agent_status_matrix": {
-                        **updated_status_matrix,
-                        next_agent: GeneratorAgentStatus.ACTIVE
-                    },
+                    "agent_status_matrix": final_status_matrix,
                     "resolved_dependencies": updated_resolved_deps,
                     "pending_dependencies": updated_pending_deps,
                     "agent_workspaces": updated_workspaces,

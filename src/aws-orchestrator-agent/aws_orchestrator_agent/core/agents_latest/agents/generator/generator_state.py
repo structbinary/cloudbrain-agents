@@ -62,7 +62,9 @@ class GeneratorSwarmState(TypedDict):
         "variable_definition_agent": GeneratorAgentStatus.INACTIVE,
         "data_source_agent": GeneratorAgentStatus.INACTIVE,
         "local_values_agent": GeneratorAgentStatus.INACTIVE,
-        "output_definition_agent": GeneratorAgentStatus.INACTIVE
+        "output_definition_agent": GeneratorAgentStatus.INACTIVE,
+        "terraform_backend_generator": GeneratorAgentStatus.INACTIVE,
+        "terraform_readme_generator": GeneratorAgentStatus.INACTIVE
     }
     
     # Dynamic Dependency Tracking
@@ -76,7 +78,9 @@ class GeneratorSwarmState(TypedDict):
         "variable_definition_agent": {},
         "data_source_agent": {},
         "local_values_agent": {},
-        "output_definition_agent": {}
+        "output_definition_agent": {},
+        "terraform_backend_generator": {},
+        "terraform_readme_generator": {}
     }
     execution_plan_data: Optional[Dict[str, Any]] = None
     state_management_plan_data: Optional[Dict[str, Any]] = None

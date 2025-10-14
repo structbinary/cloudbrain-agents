@@ -655,12 +655,12 @@ def post_process_local_values_response(
     if validation_warnings:
         llm_response.recoverable_warnings.extend(validation_warnings)
     
-    # Generate complete locals block (preserve original if validation filtered all but original exists)
+    # Generate complete locals file from validated locals (source of truth)
     if validated_locals:
         llm_response.complete_locals_file = generate_complete_locals_file(validated_locals)
     elif llm_response.complete_locals_file:
-        # Keep LLM-provided file content if present to avoid losing valid output due to strict validation
-        llm_response.complete_locals_file = llm_response.complete_locals_file.strip()
+        # Keep LLM-provided file content if present
+        llm_response.complete_locals_file = llm_response.complete_locals_file
     else:
         llm_response.complete_locals_file = ""
     
@@ -711,14 +711,12 @@ def generate_complete_locals_file(locals: List[TerraformLocalValue]) -> str:
     # Generate file header
     file_content = "# Local Values\n"
     file_content += "# This file contains all computed local values for the infrastructure\n\n"
-    file_content += "locals {\n"
     
-    # Generate local values
+    # Generate local values without adding extra locals {} wrapper
+    # The LLM should have already provided the complete locals {} block structure
     for local_value in locals:
-        file_content += f"  # {local_value.description}\n"
-        file_content += f"  {local_value.hcl_declaration}\n\n"
-    
-    file_content += "}\n"
+        file_content += f"# {local_value.description}\n"
+        file_content += f"{local_value.hcl_declaration}\n\n"
     
     return file_content.strip()
 

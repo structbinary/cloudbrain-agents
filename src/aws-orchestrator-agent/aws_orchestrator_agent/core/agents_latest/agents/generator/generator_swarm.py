@@ -41,7 +41,9 @@ from .sub_agents import (
     generate_terraform_variables, 
     generate_terraform_data_sources,
     generate_terraform_local_values,
-    generate_terraform_outputs
+    generate_terraform_outputs,
+    generate_terraform_backend,
+    generate_terraform_readme
 )
 
 # Create agent logger for generator swarm
@@ -617,6 +619,12 @@ Call `variable_definition_agent_complete_task` when:
 - You haven't verified completion
 - Message history shows no successful generation
 
+**CRITICAL**: Never directly mark your task as complete in the agent_status_matrix or update your own completion status. Always use the completion tool to properly finish your task and trigger the next agent.
+
+**NEVER manually update agent_status_matrix or call update_current_state() to mark yourself as complete. The completion tool handles all state transitions and next agent determination.**
+
+**IMPORTANT**: Even if you have already marked the task as complete in a previous execution, you must still use the completion tool to properly finish your task and trigger the next agent. Do not skip the completion tool just because the task appears to be done.
+
 ## ERROR HANDLING
 If you encounter errors:
 1. **Emit explicit error messages** with context
@@ -1028,6 +1036,160 @@ If you encounter errors:
 ])
         )
     
+    def _create_backend_agent(self):
+        """Create the Terraform Backend Generator Agent."""
+        generator_swarm_logger.log_structured(
+            level="DEBUG",
+            message="Creating terraform backend generator agent",
+            extra={}
+        )
+        
+        return create_react_agent(
+            model=self.model,
+            tools=[
+                generate_terraform_backend,  # Core function
+                create_completion_handoff_tool("terraform_backend_generator")
+            ],
+            name="terraform_backend_generator",
+            prompt = ChatPromptTemplate.from_messages([
+            ("system", """
+You are the Terraform Backend Generator Agent, responsible for generating Terraform backend and provider configurations in a multi-agent swarm system.
+
+## MESSAGE HISTORY STATE ANALYSIS
+Before taking any action, analyze your message history to determine state:
+
+**Check for these message patterns:**
+1. **Completion Messages**: Look for `"status": "done"` or completion tokens in recent messages
+2. **Generation Messages**: Look for `generate_terraform_backend` tool calls and their responses  
+3. **Loop Detection**: Count repeated actions in recent messages
+
+**State Decision Logic:**
+- **If you see completion messages** → Call completion tool immediately
+- **If you see successful generation with no dependencies** → Call completion tool
+- **If no generation messages found** → Generate first
+- **If you've repeated actions 3+ times** → Escalate with error status
+
+## STATE RECONSTRUCTION
+From the message history and shared state, determine:
+- What has already been completed (check agent_status_matrix)
+- What your current task is (check active_agent and agent_workspaces)
+- Whether you've already performed your assigned actions
+
+## CORE WORKFLOW
+1. **Analyze Messages**: Review message history for completion indicators and previous actions
+2. **Generate**: Use `generate_terraform_backend` ONLY if no successful generation found in messages
+3. **Analyze Response**: Check tool response for completion status
+4. **Complete**: If successful generation, call completion tool
+
+## LOOP PREVENTION
+Before taking any action:
+1. **Count repeated actions** in recent messages
+2. **Detect completion loops** (completion followed by regeneration)
+3. **Escalate if loop detected** (3+ repeated actions)
+
+## COMPLETION DETECTION
+Call `terraform_backend_generator_complete_task` when:
+- Your assigned task is complete
+- No further actions needed
+- Message history shows successful completion
+
+**For completion_data parameter:**
+- Pass the backend configuration data from the most recent successful generation response
+- Example: `completion_data={{"terraform_backend_config": backend_config_from_latest_generation}}`
+
+**NEVER call completion tool if:**
+- Task is incomplete
+- You haven't verified completion
+
+## ERROR HANDLING
+If you encounter errors:
+1. **Emit explicit error messages** with context
+2. **Update shared state** with error status
+3. **Never retry indefinitely**
+
+**START NOW**: Analyze your message history first, then take appropriate action based on what has already been completed.
+"""),
+    MessagesPlaceholder(variable_name="messages")
+])
+        )
+    
+    def _create_readme_agent(self):
+        """Create the Terraform README Generator Agent."""
+        generator_swarm_logger.log_structured(
+            level="DEBUG",
+            message="Creating terraform readme generator agent",
+            extra={}
+        )
+        
+        return create_react_agent(
+            model=self.model,
+            tools=[
+                generate_terraform_readme,  # Core function
+                create_completion_handoff_tool("terraform_readme_generator")
+            ],
+            name="terraform_readme_generator",
+            prompt = ChatPromptTemplate.from_messages([
+            ("system", """
+You are the Terraform README Generator Agent, responsible for generating comprehensive README.md documentation for Terraform modules in a multi-agent swarm system.
+
+## MESSAGE HISTORY STATE ANALYSIS
+Before taking any action, analyze your message history to determine state:
+
+**Check for these message patterns:**
+1. **Completion Messages**: Look for `"status": "done"` or completion tokens in recent messages
+2. **Generation Messages**: Look for `generate_terraform_readme` tool calls and their responses  
+3. **Loop Detection**: Count repeated actions in recent messages
+
+**State Decision Logic:**
+- **If you see completion messages** → Call completion tool immediately
+- **If you see successful generation with no dependencies** → Call completion tool
+- **If no generation messages found** → Generate first
+- **If you've repeated actions 3+ times** → Escalate with error status
+
+## STATE RECONSTRUCTION
+From the message history and shared state, determine:
+- What has already been completed (check agent_status_matrix)
+- What your current task is (check active_agent and agent_workspaces)
+- Whether you've already performed your assigned actions
+
+## CORE WORKFLOW
+1. **Analyze Messages**: Review message history for completion indicators and previous actions
+2. **Generate**: Use `generate_terraform_readme` ONLY if no successful generation found in messages
+3. **Analyze Response**: Check tool response for completion status
+4. **Complete**: If successful generation, call completion tool
+
+## LOOP PREVENTION
+Before taking any action:
+1. **Count repeated actions** in recent messages
+2. **Detect completion loops** (completion followed by regeneration)
+3. **Escalate if loop detected** (3+ repeated actions)
+
+## COMPLETION DETECTION
+Call `terraform_readme_generator_complete_task` when:
+- Your assigned task is complete
+- No further actions needed
+- Message history shows successful completion
+
+**For completion_data parameter:**
+- Pass the README content data from the most recent successful generation response
+- Example: `completion_data={{"readme_content": readme_content_from_latest_generation}}`
+
+**NEVER call completion tool if:**
+- Task is incomplete
+- You haven't verified completion
+
+## ERROR HANDLING
+If you encounter errors:
+1. **Emit explicit error messages** with context
+2. **Update shared state** with error status
+3. **Never retry indefinitely**
+
+**START NOW**: Analyze your message history first, then take appropriate action based on what has already been completed.
+"""),
+    MessagesPlaceholder(variable_name="messages")
+])
+        )
+    
     def build_subgraph(self) -> StateGraph:
         """
         Build the generator swarm as a standalone subgraph with isolated state schema.
@@ -1240,18 +1402,22 @@ If you encounter errors:
             data_source_agent = self._create_data_source_agent()
             local_values_agent = self._create_local_values_agent()
             output_agent = self._create_output_agent()
+            backend_agent = self._create_backend_agent()
+            readme_agent = self._create_readme_agent()
             
             generator_swarm_logger.log_structured(
                 level="DEBUG",
                 message="All agents created successfully",
                 extra={
-                    "agents_count": 5,
+                    "agents_count": 7,
                     "agent_names": [
                         "resource_configuration_agent",
                         "variable_definition_agent", 
                         "data_source_agent",
                         "local_values_agent",
-                        "output_definition_agent"
+                        "output_definition_agent",
+                        "terraform_backend_generator",
+                        "terraform_readme_generator"
                     ]
                 }
             )
@@ -1267,7 +1433,7 @@ If you encounter errors:
             )
             
             planning_swarm = create_swarm(
-                agents=[resource_agent, variable_agent, data_source_agent, local_values_agent, output_agent],
+                agents=[resource_agent, variable_agent, data_source_agent, local_values_agent, output_agent, backend_agent, readme_agent],
                 default_active_agent="resource_configuration_agent",
                 state_schema=GeneratorSwarmState
             )

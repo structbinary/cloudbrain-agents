@@ -471,7 +471,27 @@ def generate_terraform_variables(
         prompt = ChatPromptTemplate.from_messages([
             ("system", escaped_system_prompt),
             ("user", formatted_user_prompt),
-            ("user", "Please respond with valid JSON matching the TerraformVariableGenerationResponse schema:\n{format_instructions}")
+            ("user", """CRITICAL: You MUST respond with valid JSON matching the TerraformVariableGenerationResponse schema.
+
+REQUIRED FIELDS (ALL MUST BE PRESENT):
+- generated_variables: List of TerraformVariableBlock objects
+- discovered_dependencies: List of DiscoveredVariableDependency objects  
+- handoff_recommendations: List of VariableHandoffRecommendation objects
+- completion_status: String (e.g., "completed", "in_progress", "blocked", "error")
+- next_recommended_action: String describing next action
+- generation_metadata: VariableGenerationMetrics object with all required sub-fields
+- generation_timestamp: ISO timestamp string
+- complete_variables_file: String with complete variables.tf content
+- state_updates: Dict with swarm state updates
+- workspace_updates: Dict with agent workspace updates
+- critical_errors: List of error strings
+- recoverable_warnings: List of warning strings
+- checkpoint_data: Dict with checkpoint information
+
+Format Instructions:
+{format_instructions}
+
+RESPOND WITH COMPLETE JSON ONLY - NO OTHER TEXT.""")
         ]).partial(format_instructions=parser.get_format_instructions())
         
         # Create and execute chain using centralized LLM
@@ -536,17 +556,61 @@ def generate_terraform_variables(
         )
         
         # Execute the chain
-        llm_response = chain.invoke({})
-        
-        variable_generator_logger.log_structured(
-            level="DEBUG",
-            message="LLM response received, starting post-processing",
-            extra={
-                "generated_variables_count": len(llm_response.generated_variables),
-                "discovered_dependencies_count": len(llm_response.discovered_dependencies),
-                "generation_id": agent_workspace.get('generation_id', 'unknown')
-            }
-        )
+        try:
+            llm_response = chain.invoke({})
+            
+            variable_generator_logger.log_structured(
+                level="DEBUG",
+                message="LLM response received, starting post-processing",
+                extra={
+                    "generated_variables_count": len(llm_response.generated_variables),
+                    "discovered_dependencies_count": len(llm_response.discovered_dependencies),
+                    "generation_id": agent_workspace.get('generation_id', 'unknown')
+                }
+            )
+        except Exception as parse_error:
+            variable_generator_logger.log_structured(
+                level="ERROR",
+                message="Failed to parse LLM response as TerraformVariableGenerationResponse",
+                extra={
+                    "error": str(parse_error),
+                    "error_type": type(parse_error).__name__,
+                    "generation_id": agent_workspace.get('generation_id', 'unknown')
+                }
+            )
+            # Create a minimal valid response to prevent complete failure
+            from .tf_variable_generator_tool import VariableGenerationMetrics
+            llm_response = TerraformVariableGenerationResponse(
+                generated_variables=[],
+                discovered_dependencies=[],
+                handoff_recommendations=[],
+                completion_status="error",
+                next_recommended_action="retry_with_simplified_prompt",
+                generation_metadata=VariableGenerationMetrics(
+                    total_variables_generated=0,
+                    generation_duration_seconds=(datetime.now() - start_time).total_seconds(),
+                    dependencies_discovered=0,
+                    handoffs_required=0,
+                    validation_errors=[f"LLM response parsing failed: {str(parse_error)}"]
+                ),
+                generation_timestamp=datetime.now(),
+                complete_variables_file="",
+                state_updates={},
+                workspace_updates={
+                    "error": str(parse_error),
+                    "completion_status": "error",
+                    "error_timestamp": datetime.now().isoformat()
+                },
+                critical_errors=[f"LLM response parsing failed: {str(parse_error)}"],
+                recoverable_warnings=[],
+                checkpoint_data={
+                    "stage": "variable_generation",
+                    "agent": "variable_definition_agent",
+                    "checkpoint_type": "error",
+                    "error": str(parse_error),
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
         
         # Post-process and enhance response
         enhanced_response = post_process_variable_response(

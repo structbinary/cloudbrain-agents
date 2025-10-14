@@ -27,6 +27,9 @@ class DefaultConfig:
     LLM_HIGHER_MODEL: str = "gpt-5-mini"
     LLM_HIGHER_TEMPERATURE: float = 1
     LLM_HIGHER_MAX_TOKENS: int = 15000
+
+    # Module Configuration
+    MODULE_PATH: str = "/Users/structbinary/Documents/work/talkops/cloudbrain-agents/src/aws-orchestrator-agent"
     
     # Logging Configuration
     LOG_LEVEL: str = "INFO"

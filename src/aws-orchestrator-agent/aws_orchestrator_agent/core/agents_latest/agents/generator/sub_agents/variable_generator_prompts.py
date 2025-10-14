@@ -79,10 +79,19 @@ Handle all variable_specs generically, with context-aware processing and agent c
 
 8. **Return** `TerraformVariableGenerationResponse` JSON:  
    - `generated_variables`: array of HCL variable blocks  
-   - `dependencies`: list of true hand-off dependencies (excluding any variable for which an HCL block was generated)  
-   - `handoffs`: list of queued hand-offs  
+   - `discovered_dependencies`: list of true hand-off dependencies (excluding any variable for which an HCL block was generated)  
+   - `handoff_recommendations`: list of queued hand-offs  
    - `completion_status`: (completed|completed_with_dependencies|blocked|error)  
-   - `metrics`: { variable_count, dependency_count, duration_ms }  
+   - `next_recommended_action`: string describing next action
+   - `generation_metadata`: VariableGenerationMetrics object with all required fields
+   - `complete_variables_file`: string with complete variables.tf content
+   - `workspace_updates`: dict with agent workspace updates
+   - `state_updates`: dict with swarm state updates
+   - `critical_errors`: list of critical errors
+   - `recoverable_warnings`: list of warnings
+   - `checkpoint_data`: dict with checkpoint information
+
+**CRITICAL: You MUST return ALL required fields from TerraformVariableGenerationResponse schema. Missing any field will cause validation errors.**  
 
 
 ### Few-Shot Examples

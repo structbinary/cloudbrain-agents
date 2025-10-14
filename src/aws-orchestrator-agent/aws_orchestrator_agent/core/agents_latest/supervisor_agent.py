@@ -211,6 +211,7 @@ class CustomSupervisorAgent(BaseAgent):
         - For ANY infrastructure request (creating, writing, or generating Terraform modules), ALWAYS start by delegating to planner_sub_supervisor
         - The planner_sub_supervisor will analyze requirements and create execution plans
         - After planning is complete (when you receive planner_data), IMMEDIATELY delegate to generator_swarm to generate the actual Terraform code
+        - After generation is complete (when you receive generation_data), IMMEDIATELY delegate to writer_react_agent to write the Terraform files to disk
         - Use validation_agent to validate the generated code if needed
         - Use editor_agent to modify existing configurations if requested
         
@@ -223,7 +224,9 @@ class CustomSupervisorAgent(BaseAgent):
              → transfer_to_planner_sub_supervisor
            - If workflow_state.current_phase == "planning" and planning_complete and not generation_complete:
              → transfer_to_generator_swarm
-           - If workflow_state.current_phase == "generation" and generation_complete and not validation_complete:
+           - If workflow_state.current_phase == "generation" and generation_complete and not writing_complete:
+             → transfer_to_writer_react_agent
+           - If workflow_state.current_phase == "writing" and writing_complete and not validation_complete:
              → transfer_to_validation_agent
            - If workflow_state.current_phase == "validation" and validation_complete:
              → Workflow complete, return final result
@@ -237,11 +240,13 @@ class CustomSupervisorAgent(BaseAgent):
         - Check workflow_state for phase completion flags:
           * planning_complete: True when planner_data is available and planning_complete=True
           * generation_complete: True when generation_data is available
+          * writing_complete: True when writing_data is available
           * validation_complete: True when validation_data is available
         - If completion flag not set after reasonable time, log error and retry once
         - If retry fails, terminate workflow and escalate to human
         - **CRITICAL: When planning_complete == True, you MUST immediately delegate to generator_swarm**
-        - **DO NOT stop the workflow after planning - ALWAYS continue to generation**
+        - **CRITICAL: When generation_complete == True, you MUST immediately delegate to writer_react_agent**
+        - **DO NOT stop the workflow after planning or generation - ALWAYS continue to the next phase**
         
         Instructions:
         - Delegate one agent at a time, do not call agents in parallel
@@ -290,34 +295,40 @@ class CustomSupervisorAgent(BaseAgent):
                     }
                 )
                 
-                # Create transformation node wrapper function
-                async def generator_swarm_transformation_node(supervisor_state: SupervisorState, config: dict = None, **kwargs) -> Dict[str, Any]:
-                    """
-                    Transformation node wrapper that handles state conversion between SupervisorState and GeneratorSwarmState.
-                    This follows the LangGraph pattern for disjoint schemas with explicit state transformation.
-                    
-                    Args:
-                        supervisor_state: SupervisorState from parent graph
-                        config: Optional configuration dict (for langgraph-supervisor compatibility)
-                        **kwargs: Additional keyword arguments (for langgraph-supervisor compatibility)
-                    """
-                    try:
-                        # 1. Pass SupervisorState directly to wrapper (let wrapper handle transformation)
-                        # This ensures tools receive the full GeneratorSwarmState via InjectedState
-                        generator_output = await agent.create_wrapper_function()(supervisor_state)
+                # Create transformation node wrapper function with proper closure
+                # Capture the agent in the closure by creating a factory function
+                def make_generator_swarm_transformation_node(generator_agent):
+                    async def generator_swarm_transformation_node(supervisor_state: SupervisorState, config: dict = None, **kwargs) -> Dict[str, Any]:
+                        """
+                        Transformation node wrapper that handles state conversion between SupervisorState and GeneratorSwarmState.
+                        This follows the LangGraph pattern for disjoint schemas with explicit state transformation.
                         
-                        return generator_output
-                        
-                    except Exception as e:
-                        supervisor_logger.log_structured(
-                            level="ERROR",
-                            message="Generator swarm transformation node error",
-                            extra={
-                                "error": str(e),
-                                "error_type": type(e).__name__
-                            }
-                        )
-                        raise
+                        Args:
+                            supervisor_state: SupervisorState from parent graph
+                            config: Optional configuration dict (for langgraph-supervisor compatibility)
+                            **kwargs: Additional keyword arguments (for langgraph-supervisor compatibility)
+                        """
+                        try:
+                            # 1. Pass SupervisorState directly to wrapper (let wrapper handle transformation)
+                            # This ensures tools receive the full GeneratorSwarmState via InjectedState
+                            generator_output = await generator_agent.create_wrapper_function()(supervisor_state)
+                            
+                            return generator_output
+                            
+                        except Exception as e:
+                            supervisor_logger.log_structured(
+                                level="ERROR",
+                                message="Generator swarm transformation node error",
+                                extra={
+                                    "error": str(e),
+                                    "error_type": type(e).__name__
+                                }
+                            )
+                            raise
+                    return generator_swarm_transformation_node
+                
+                # Create the transformation node with proper agent capture
+                generator_swarm_transformation_node = make_generator_swarm_transformation_node(agent)
                 
                 # Create wrapper object for langgraph-supervisor compatibility
                 class GeneratorSwarmWrapper:
@@ -480,7 +491,60 @@ class CustomSupervisorAgent(BaseAgent):
                             message="No planner data found in message history",
                             extra={"current_agent": state.current_agent}
                         )
-                
+                if (state.planner_data and state.generation_data and not state.writer_data):
+                    writer_tool_message = None
+                    for message in reversed(state.messages):
+                        if (hasattr(message, 'name') and 
+                            message.name == 'completion_tool' and
+                            hasattr(message, 'content')):
+                            writer_tool_message = message
+                            break
+                    
+                    if not writer_tool_message:
+                        supervisor_logger.log_structured(
+                            level="DEBUG",
+                            message="No writer_complete_task tool message found in message history",
+                            extra={"total_messages": len(state.messages)}
+                        )
+                        return None
+                    
+                    # Parse the content as a dictionary
+                    content = writer_tool_message.content
+                    if not content or not isinstance(content, str):
+                        supervisor_logger.log_structured(
+                            level="WARNING",
+                            message="Tool message content is empty or not a string",
+                            extra={"content_type": type(content).__name__}
+                        )
+                        return None
+                    
+                    # Try to parse the content as a dictionary
+                    # Since we now use model_dump(mode='json'), the content should be valid JSON
+                    response = {}
+                    if isinstance(content, str):
+                        response = json.loads(content)
+                    else:
+                        response = content
+                    completion_status = response.get("completion_status", "completed")
+                    completion_summary = response.get("completion_summary", "")
+                    completion_files_created = response.get("completion_files_created", [])
+
+                    state.writer_data = {
+                        "status": completion_status,
+                        "summary": completion_summary,
+                        "files_created": completion_files_created
+                    }
+                    state.workflow_state.set_phase_complete("writer")
+                    supervisor_logger.log_structured(
+                        level="INFO",
+                        message="Successfully parsed writer data and updated workflow state - writer complete",
+                        extra={
+                            "writer_data_keys": list(state.writer_data.keys()) if state.writer_data else [],
+                            "writer_complete": True,
+                            "current_agent": state.current_agent,
+                            "workflow_phase_updated": True
+                        }
+                    )
                 # Process agent completions and update workflow state
                 self._process_agent_completions(state)
                 
@@ -513,6 +577,54 @@ The planning workflow is complete and you must proceed to the generation phase."
                         }
                     )
                 
+                elif (state.workflow_state.generation_complete and not state.workflow_state.writer_complete):
+                    
+                    completion_context = f"""GENERATION PHASE COMPLETE:
+generation_complete = True
+current_phase = {state.workflow_state.current_phase}
+workflow_complete = {state.workflow_state.workflow_complete}
+
+MANDATORY ACTION: You MUST delegate to writer_react_agent to write the Terraform code.
+DO NOT delegate back to generator_swarm.
+The generation workflow is complete and you must proceed to the writer phase.
+"""
+
+                    # Set explicit completion context for LLM
+                    state.llm_input_messages = [HumanMessage(content=completion_context)]
+                    
+                    supervisor_logger.log_structured(
+                        level="INFO",
+                        message="Added explicit completion context for LLM - generation complete",
+                        extra={
+                            "generation_complete": state.workflow_state.generation_complete,
+                            "current_phase": state.workflow_state.current_phase,
+                            "current_agent": state.current_agent
+                        }
+                    )
+                
+                elif (state.workflow_state.writer_complete):
+                    
+                    completion_context = f"""WORKFLOW COMPLETE:
+writer_complete = True
+current_phase = {state.workflow_state.current_phase}
+workflow_complete = {state.workflow_state.workflow_complete}
+
+MANDATORY ACTION: ALL WORK IS COMPLETE. HURRAY!, Workflow complete. Do not delegate back to any agent.
+"""
+
+                    # Set explicit completion context for LLM
+                    state.llm_input_messages = [HumanMessage(content=completion_context)]
+                    
+                    supervisor_logger.log_structured(
+                        level="INFO",
+                        message="Added explicit completion context for LLM - workflow complete",
+                        extra={
+                            "workflow_complete": state.workflow_state.workflow_complete,
+                            "current_phase": state.workflow_state.current_phase,
+                            "current_agent": state.current_agent
+                        }
+                    )
+
                 return state
                 
             except Exception as e:
@@ -689,25 +801,25 @@ The planning workflow is complete and you must proceed to the generation phase."
                 state.workflow_state.set_phase_complete("generation")
                 state.workflow_state.set_agent_handoff(
                     from_agent="generator_swarm",
-                    to_agent=None,  # No next agent, workflow complete
-                    reason="Generation complete, workflow finished"
+                    to_agent="writer_react_agent",  # Handoff to writer react agent
+                    reason="Generation complete, handoff to writer react agent"
                 )
             
             # Check for validation completion (optional phase)
-            if (state.validation_data and 
-                not state.workflow_state.validation_complete and
-                self._is_validation_complete(state.validation_data)):
+            if (state.writer_data and 
+                not state.workflow_state.writer_complete and
+                self._is_writer_complete(state.writer_data)):
                 
                 supervisor_logger.log_structured(
                     level="INFO",
-                    message="Validation phase completed - updating workflow state",
+                    message="Writer phase completed - updating workflow state",
                     extra={
                         "current_phase": state.workflow_state.current_phase,
-                        "validation_complete": True
+                        "writer_complete": True
                     }
                 )
                 
-                state.workflow_state.set_phase_complete("validation")
+                state.workflow_state.set_phase_complete("writer")
             
             # Check for editing completion (optional phase)
             if (state.editor_data and 
@@ -753,14 +865,14 @@ The planning workflow is complete and you must proceed to the generation phase."
         return (generation_data.get("generated_module") is not None or
                 generation_data.get("status") == "completed")
     
-    def _is_validation_complete(self, validation_data: Dict[str, Any]) -> bool:
+    def _is_writer_complete(self, writer_data: Dict[str, Any]) -> bool:
         """Check if validation phase is complete."""
-        if not validation_data:
+        if not writer_data:
             return False
         
-        # Check for validation report or completion status
-        return (validation_data.get("validation_report") is not None or
-                validation_data.get("status") == "completed")
+        # Check for module reference or completion status
+        return (writer_data.get("module_ref") is not None or
+                writer_data.get("status") == "completed")
     
     def _is_editing_complete(self, editor_data: Dict[str, Any]) -> bool:
         """Check if editing phase is complete."""
@@ -923,8 +1035,8 @@ The planning workflow is complete and you must proceed to the generation phase."
                 state.current_agent = AgentType.PLANNER
             elif next_phase == "generation":
                 state.current_agent = AgentType.GENERATION
-            elif next_phase == "validation":
-                state.current_agent = AgentType.VALIDATION
+            elif next_phase == "writer":
+                state.current_agent = AgentType.WRITER
             elif next_phase == "editing":
                 state.current_agent = AgentType.EDITOR
             
